@@ -19,6 +19,10 @@ from typing import Any
 
 import torch
 
+from rlinf.models.embodiment.reward.dopamine_grm_reward_model import (
+    parse_dopamine_grm_score,
+)
+
 logger = logging.getLogger(__name__)
 
 REWARD_PARSER_REGISTRY: dict[str, type] = {}
@@ -141,4 +145,17 @@ class QwentrendRewardParser(BaseRewardParser):
                     "[RMDBG_PARSE] invalid_samples=%s",
                     invalid_examples,
                 )
+        return torch.tensor(rewards, dtype=torch.float32)
+
+
+@register_reward_parser("dopamine_grm_reward_parser")
+class DopamineGRMRewardParser(BaseRewardParser):
+    def __init__(self, invalid_reward: float = 0.0) -> None:
+        self.invalid_reward = float(invalid_reward)
+
+    def parse_rewards(self, outputs: list[str]) -> torch.Tensor:
+        rewards = []
+        for output in outputs:
+            parsed = parse_dopamine_grm_score(output)
+            rewards.append(parsed.raw_score if parsed.valid else self.invalid_reward)
         return torch.tensor(rewards, dtype=torch.float32)

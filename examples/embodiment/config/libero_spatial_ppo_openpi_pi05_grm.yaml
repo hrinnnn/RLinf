@@ -1,0 +1,46 @@
+defaults:
+  - libero_spatial_ppo_openpi_pi05
+  - _self_
+
+cluster:
+  component_placement:
+    actor,env,rollout,reward: all
+
+runner:
+  logger:
+    experiment_name: "libero_spatial_ppo_openpi_pi05_grm"
+
+reward:
+  use_reward_model: true
+  group_name: "RewardGroup"
+  reward_mode: history_buffer
+  history_reward_assign: false
+  reward_weight: 0.1
+  env_reward_weight: 1.0
+  model:
+    model_type: dopamine_grm
+    model_name: "tanhuajie2001/Robo-Dopamine-GRM-2.0-4B-Preview"
+    grm_endpoint: "http://127.0.0.1:8000/v1/chat/completions"
+    goal_bank_dir: "assets/grm_goal_bank/libero_spatial"
+    modes: ["incremental", "forward", "backward"]
+    fusion: mean_valid
+    gamma: ${algorithm.gamma}
+    grm_interval_chunks: 1
+    invalid_reward: 0.0
+    phi_clip: [0.0, 1.0]
+    request_timeout: 120
+    max_tokens: 32
+    temperature: 0.0
+    history_buffers:
+      grm_window:
+        history_size: 1
+        min_history_size: 1
+        input_interval: 1
+        history_keys:
+          - main_images
+          - wrist_images
+          - reference_start_main_images
+          - reference_start_wrist_images
+          - task_descriptions
+          - task_ids
+        input_on_done: true
