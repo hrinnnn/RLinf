@@ -15,23 +15,22 @@
 """Reward models for embodied RL."""
 
 from rlinf.models.embodiment.reward.base_reward_model import BaseRewardModel
-from rlinf.models.embodiment.reward.resnet_reward_model import ResNetRewardModel
-from rlinf.models.embodiment.reward.vlm_reward_model import (
-    HistoryVLMRewardModel,
-    VLMRewardModel,
-)
 
 __all__ = [
     "BaseRewardModel",
-    "ResNetRewardModel",
-    "VLMRewardModel",
-    "HistoryVLMRewardModel",
+    "get_reward_model_class",
 ]
 
 reward_model_registry = {
-    "resnet": ResNetRewardModel,
-    "vlm": VLMRewardModel,
-    "history_vlm": HistoryVLMRewardModel,
+    "resnet": "rlinf.models.embodiment.reward.resnet_reward_model:ResNetRewardModel",
+    "dopamine_grm": (
+        "rlinf.models.embodiment.reward.dopamine_grm_reward_model:"
+        "DopamineGRMRewardModel"
+    ),
+    "vlm": "rlinf.models.embodiment.reward.vlm_reward_model:VLMRewardModel",
+    "history_vlm": (
+        "rlinf.models.embodiment.reward.vlm_reward_model:HistoryVLMRewardModel"
+    ),
 }
 
 
@@ -39,4 +38,8 @@ def get_reward_model_class(reward_model_type: str):
     if reward_model_type not in reward_model_registry:
         raise ValueError(f"Unsupported reward model type: {reward_model_type}")
 
-    return reward_model_registry[reward_model_type]
+    import importlib
+
+    module_name, class_name = reward_model_registry[reward_model_type].split(":")
+    module = importlib.import_module(module_name)
+    return getattr(module, class_name)

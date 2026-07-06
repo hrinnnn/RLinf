@@ -133,6 +133,7 @@ class LiberoEnv(gym.Env):
 
         self.video_cfg = cfg.video_cfg
         self.current_raw_obs = None
+        self.reference_start_obs = None
 
     def _log_evaluation_mode(self):
         """Log the LIBERO evaluation mode banner (rank 0 env worker only)."""
@@ -643,7 +644,35 @@ class LiberoEnv(gym.Env):
             "wrist_images": wrist_image_tensor,
             "states": states,
             "task_descriptions": self.task_descriptions,
+            "task_ids": torch.as_tensor(self.task_ids, dtype=torch.long),
         }
+        return obs
+
+    def _update_reference_start_obs(self, obs, env_idx):
+        if self.reference_start_obs is None:
+            self.reference_start_obs = {
+                "main_images": obs["main_images"].clone(),
+                "wrist_images": obs["wrist_images"].clone(),
+            }
+        else:
+            self.reference_start_obs["main_images"][env_idx] = obs["main_images"][
+                env_idx
+            ].clone()
+            self.reference_start_obs["wrist_images"][env_idx] = obs["wrist_images"][
+                env_idx
+            ].clone()
+
+    def _attach_reference_start_obs(self, obs):
+        if self.reference_start_obs is None:
+            obs["reference_start_main_images"] = obs["main_images"].clone()
+            obs["reference_start_wrist_images"] = obs["wrist_images"].clone()
+            return obs
+        obs["reference_start_main_images"] = self.reference_start_obs[
+            "main_images"
+        ].clone()
+        obs["reference_start_wrist_images"] = self.reference_start_obs[
+            "wrist_images"
+        ].clone()
         return obs
 
     def _reconfigure(self, reset_state_ids, env_idx):
@@ -711,6 +740,8 @@ class LiberoEnv(gym.Env):
             self.current_raw_obs[idx] = raw_obs[i]
 
         obs = self._wrap_obs(self.current_raw_obs)
+        self._update_reference_start_obs(obs, env_idx)
+        obs = self._attach_reference_start_obs(obs)
         self._reset_metrics(env_idx)
         infos = {}
         return obs, infos
@@ -726,6 +757,7 @@ class LiberoEnv(gym.Env):
         infos = list_of_dict_to_dict_of_list(info_lists)
         truncations = self.elapsed_steps >= self.cfg.max_episode_steps
         obs = self._wrap_obs(raw_obs)
+        obs = self._attach_reference_start_obs(obs)
 
         step_reward = self._calc_step_reward(terminations)
 
