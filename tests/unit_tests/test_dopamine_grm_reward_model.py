@@ -34,8 +34,9 @@ class FakeDopamineGRMRewardModel(DopamineGRMRewardModel):
     def _request_grm(self, payloads):
         del payloads
         if not self.responses:
-            return [""] * len(self.modes)
-        return self.responses.pop(0)
+            return [""] * len(self.modes), [0.0] * len(self.modes)
+        outputs = self.responses.pop(0)
+        return outputs, [0.0] * len(outputs)
 
 
 def _write_goal_bank(tmp_path):

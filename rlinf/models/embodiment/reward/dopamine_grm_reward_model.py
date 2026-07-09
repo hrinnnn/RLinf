@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -217,6 +218,10 @@ class DopamineGRMRewardModel(BaseRewardModel):
         self.max_tokens = int(cfg.get("max_tokens", 32))
         self.temperature = float(cfg.get("temperature", 0.0))
         self.num_envs = int(cfg.get("num_envs", 1))
+        metrics_log_path = cfg.get("metrics_log_path", None)
+        self.metrics_log_path = Path(str(metrics_log_path)) if metrics_log_path else None
+        if self.metrics_log_path is not None:
+            self.metrics_log_path.parent.mkdir(parents=True, exist_ok=True)
         self.prev_phi = torch.zeros(self.num_envs, dtype=torch.float32)
         self.has_prev_phi = torch.zeros(self.num_envs, dtype=torch.bool)
         self.reward_call_counts = torch.zeros(self.num_envs, dtype=torch.long)
@@ -369,10 +374,11 @@ class DopamineGRMRewardModel(BaseRewardModel):
                 )
         return [{"role": "user", "content": content}]
 
-    def _request_grm(self, payloads: list[dict[str, Any]]) -> list[str]:
+    def _request_grm(self, payloads: list[dict[str, Any]]) -> tuple[list[str], list[float]]:
         if not self.endpoint:
             raise ValueError("reward.model.grm_endpoint must be set for dopamine_grm")
         outputs = []
+        latencies = []
         for payload in payloads:
             body = {
                 "model": self.model_name,
@@ -386,6 +392,7 @@ class DopamineGRMRewardModel(BaseRewardModel):
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
+            start_time = time.perf_counter()
             try:
                 with urllib.request.urlopen(
                     request, timeout=self.request_timeout
@@ -394,13 +401,26 @@ class DopamineGRMRewardModel(BaseRewardModel):
             except urllib.error.URLError as exc:
                 logger.warning("Dopamine GRM request failed: %s", exc)
                 outputs.append("")
+                latencies.append(time.perf_counter() - start_time)
                 continue
             outputs.append(
                 data.get("choices", [{}])[0]
                 .get("message", {})
                 .get("content", data.get("choices", [{}])[0].get("text", ""))
             )
-        return outputs
+            latencies.append(time.perf_counter() - start_time)
+        return outputs, latencies
+
+    def _write_metric_record(self, record: dict[str, Any]) -> None:
+        if self.metrics_log_path is None:
+            return
+        record = {
+            "time_unix": time.time(),
+            "model_type": "dopamine_grm",
+            **record,
+        }
+        with open(self.metrics_log_path, "a", encoding="utf-8") as file:
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def _reference_start_obs(self, current_obs: dict[str, Any]) -> dict[str, Any]:
         start_main = current_obs.get("reference_start_main_images")
@@ -422,9 +442,20 @@ class DopamineGRMRewardModel(BaseRewardModel):
         success: bool,
     ) -> float:
         self.reward_call_counts[env_idx] += 1
+        call_count = int(self.reward_call_counts[env_idx].item())
         if self.reward_call_counts[env_idx].item() % self.grm_interval_chunks != 0:
+            self._write_metric_record(
+                {
+                    "env_idx": env_idx,
+                    "call_count": call_count,
+                    "skipped": True,
+                    "grm_interval_chunks": self.grm_interval_chunks,
+                    "shaping_reward": 0.0,
+                }
+            )
             return 0.0
 
+        env_start_time = time.perf_counter()
         current_obs = _clone_obs(observations, env_idx)
         if not self.has_prev_phi[env_idx]:
             self.prev_phi[env_idx] = 0.0
@@ -456,30 +487,83 @@ class DopamineGRMRewardModel(BaseRewardModel):
             )
             for mode in self.modes
         ]
-        outputs = self._request_grm(payloads)
+        outputs, request_latencies = self._request_grm(payloads)
         valid_phis = []
         prev_phi = float(self.prev_phi[env_idx].item())
+        mode_records: dict[str, dict[str, Any]] = {}
         for mode, output in zip(self.modes, outputs):
             parsed = parse_dopamine_grm_score(output)
+            mode_record = {
+                "valid": parsed.valid,
+                "raw_score": parsed.raw_score if parsed.valid else None,
+                "phi": None,
+            }
             if not parsed.valid:
+                mode_records[mode] = mode_record
                 continue
-            valid_phis.append(
-                dopamine_grm_score_to_phi(
-                    mode, parsed.raw_score, prev_phi, self.phi_clip
-                )
+            phi = dopamine_grm_score_to_phi(
+                mode, parsed.raw_score, prev_phi, self.phi_clip
             )
+            mode_record["phi"] = phi
+            mode_records[mode] = mode_record
+            valid_phis.append(phi)
 
+        valid = True
         if success:
             phi_next = 1.0
         else:
             fused_phi = fuse_valid_phis(valid_phis)
             if fused_phi is None:
+                valid = False
+                self._write_metric_record(
+                    {
+                        "env_idx": env_idx,
+                        "call_count": call_count,
+                        "task": task,
+                        "success": success,
+                        "valid": valid,
+                        "skipped": False,
+                        "prev_phi": prev_phi,
+                        "phi_fused": None,
+                        "phi_next": None,
+                        "shaping_reward": self.invalid_reward,
+                        "mode_metrics": mode_records,
+                        "valid_mode_count": 0,
+                        "invalid_mode_count": len(self.modes),
+                        "grm_latency_sec": float(sum(request_latencies)),
+                        "grm_latency_by_mode_sec": dict(
+                            zip(self.modes, request_latencies)
+                        ),
+                        "total_latency_sec": time.perf_counter() - env_start_time,
+                    }
+                )
                 return self.invalid_reward
             phi_next = fused_phi
 
         reward = self.gamma_eff * phi_next - prev_phi
         self.prev_phi[env_idx] = float(phi_next)
         self.previous_grm_obs[env_idx] = current_obs
+        valid_mode_count = len(valid_phis)
+        self._write_metric_record(
+            {
+                "env_idx": env_idx,
+                "call_count": call_count,
+                "task": task,
+                "success": success,
+                "valid": valid,
+                "skipped": False,
+                "prev_phi": prev_phi,
+                "phi_fused": phi_next,
+                "phi_next": phi_next,
+                "shaping_reward": float(reward),
+                "mode_metrics": mode_records,
+                "valid_mode_count": valid_mode_count,
+                "invalid_mode_count": len(self.modes) - valid_mode_count,
+                "grm_latency_sec": float(sum(request_latencies)),
+                "grm_latency_by_mode_sec": dict(zip(self.modes, request_latencies)),
+                "total_latency_sec": time.perf_counter() - env_start_time,
+            }
+        )
         return float(reward)
 
     @torch.no_grad()
