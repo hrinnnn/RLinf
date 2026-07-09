@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import multiprocessing
+import os
 import warnings
 from multiprocessing import connection
 from typing import Any, Callable, Optional, Union
@@ -96,6 +97,9 @@ def _worker(
         return None
 
     parent.close()
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if visible_devices and "," not in visible_devices:
+        os.environ["MUJOCO_EGL_DEVICE_ID"] = "0"
     env = env_fn_wrapper.data()
     try:
         while True:
