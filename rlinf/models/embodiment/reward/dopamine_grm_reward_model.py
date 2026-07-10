@@ -77,7 +77,7 @@ Evaluation Criteria (apply across all three views)
 3) View-Specific Evidence & Consistency:
    - Use the Front view for global layout, object pose, approach path, end-state geometry, and scene-level constraints.
    - Use the Left/Right Wrist views to inspect fine-grained gripper state, contact, slippage, misalignment, unintended contact, or occluded collisions.
-   - When views disagree, prioritize the view that provides decisive cues for the criterion at hand.
+   - When views disagree, prioritize the view that provides decisive cues for the criterion at hand. Wrist views often override for grasp/contact validity and safety.
    - If any single view shows a failure that invalidates success, let that override when judging progress.
 4) Ignore Irrelevant Factors: Lighting, color shifts, background clutter, or UI/watermarks that do not affect task success.
 5) Ambiguity: If evidence is genuinely inconclusive or conflicting without decisive cues, treat progress as unchanged -> 0%.
@@ -131,6 +131,31 @@ def fuse_valid_phis(phis: list[float]) -> float | None:
     if not phis:
         return None
     return float(np.mean(np.asarray(phis, dtype=np.float32)))
+
+
+def consistency_aware_phi(
+    prev_phi: float,
+    incremental_phi: float,
+    forward_phi: float,
+    backward_phi: float,
+    alpha: float,
+    epsilon: float,
+    phi_clip: tuple[float, float] = (0.0, 1.0),
+) -> tuple[float, float, float, float]:
+    """Implement Robo-Dopamine Eq. 9--11 for online progress updates."""
+    global_mean = (forward_phi + backward_phi) / 2.0
+    discrepancy = abs(backward_phi - forward_phi) / (global_mean + epsilon)
+    confidence = float(np.exp(-alpha * discrepancy**2))
+    incremental_delta = incremental_phi - prev_phi
+    phi = prev_phi + confidence / 2.0 * (
+        global_mean - prev_phi + incremental_delta
+    )
+    return (
+        float(np.clip(phi, phi_clip[0], phi_clip[1])),
+        float(global_mean),
+        float(discrepancy),
+        confidence,
+    )
 
 
 def _to_pil_image(image: Any) -> Image.Image:
@@ -212,6 +237,10 @@ class DopamineGRMRewardModel(BaseRewardModel):
         self.grm_interval_chunks = max(1, int(cfg.get("grm_interval_chunks", 1)))
         self.gamma_eff = self.gamma**self.grm_interval_chunks
         self.invalid_reward = float(cfg.get("invalid_reward", 0.0))
+        self.enable_consistency_check = bool(cfg.get("consistency_check", True))
+        self.consistency_alpha = float(cfg.get("consistency_alpha", 1.0))
+        self.consistency_epsilon = float(cfg.get("consistency_epsilon", 1e-6))
+        self.terminal_potential = float(cfg.get("terminal_potential", 0.0))
         phi_clip = cfg.get("phi_clip", [0.0, 1.0])
         self.phi_clip = (float(phi_clip[0]), float(phi_clip[1]))
         self.request_timeout = float(cfg.get("request_timeout", 120.0))
@@ -440,14 +469,21 @@ class DopamineGRMRewardModel(BaseRewardModel):
         observations: dict[str, Any],
         env_idx: int,
         success: bool,
+        done: bool,
     ) -> float:
+        episode_terminal = bool(done or success)
         self.reward_call_counts[env_idx] += 1
         call_count = int(self.reward_call_counts[env_idx].item())
-        if self.reward_call_counts[env_idx].item() % self.grm_interval_chunks != 0:
+        if (
+            self.reward_call_counts[env_idx].item() % self.grm_interval_chunks != 0
+            and not episode_terminal
+        ):
             self._write_metric_record(
                 {
                     "env_idx": env_idx,
                     "call_count": call_count,
+                    "success": success,
+                    "done": done,
                     "skipped": True,
                     "grm_interval_chunks": self.grm_interval_chunks,
                     "shaping_reward": 0.0,
@@ -508,41 +544,97 @@ class DopamineGRMRewardModel(BaseRewardModel):
             mode_records[mode] = mode_record
             valid_phis.append(phi)
 
-        valid = True
+        phi_by_mode = {
+            mode: record["phi"]
+            for mode, record in mode_records.items()
+            if record["valid"] and record["phi"] is not None
+        }
+        consistency_applied = False
+        fusion_method = "mean_valid"
+        global_mean = None
+        normalized_discrepancy = None
+        confidence = None
         if success:
+            # LIBERO's success signal is authoritative. The state is reset immediately
+            # after this transition, while terminal_potential keeps PBRS episodic-safe.
             phi_next = 1.0
-        else:
+            fusion_method = "success_override"
+        elif self.enable_consistency_check and all(
+            mode in phi_by_mode for mode in ("incremental", "forward", "backward")
+        ):
+            phi_next, global_mean, normalized_discrepancy, confidence = (
+                consistency_aware_phi(
+                    prev_phi=prev_phi,
+                    incremental_phi=float(phi_by_mode["incremental"]),
+                    forward_phi=float(phi_by_mode["forward"]),
+                    backward_phi=float(phi_by_mode["backward"]),
+                    alpha=self.consistency_alpha,
+                    epsilon=self.consistency_epsilon,
+                    phi_clip=self.phi_clip,
+                )
+            )
+            consistency_applied = True
+            fusion_method = "consistency_aware"
+        elif not success:
             fused_phi = fuse_valid_phis(valid_phis)
             if fused_phi is None:
-                valid = False
+                if done:
+                    # A zero terminal potential preserves the finite-episode PBRS boundary.
+                    reward = self.gamma_eff * self.terminal_potential - prev_phi
+                    self._write_metric_record(
+                        {
+                            "env_idx": env_idx,
+                            "call_count": call_count,
+                            "task": task,
+                            "success": success,
+                            "done": done,
+                            "valid": False,
+                            "skipped": False,
+                            "prev_phi": prev_phi,
+                            "phi_fused": None,
+                            "phi_next": None,
+                            "potential_next_for_shaping": self.terminal_potential,
+                            "shaping_reward": reward,
+                            "fusion_method": "terminal_boundary_invalid_grm",
+                            "mode_metrics": mode_records,
+                            "valid_mode_count": 0,
+                            "invalid_mode_count": len(self.modes),
+                            "grm_latency_sec": float(sum(request_latencies)),
+                            "grm_latency_by_mode_sec": dict(zip(self.modes, request_latencies)),
+                            "total_latency_sec": time.perf_counter() - env_start_time,
+                        }
+                    )
+                    return float(reward)
                 self._write_metric_record(
                     {
                         "env_idx": env_idx,
                         "call_count": call_count,
                         "task": task,
                         "success": success,
-                        "valid": valid,
+                        "done": done,
+                        "valid": False,
                         "skipped": False,
                         "prev_phi": prev_phi,
                         "phi_fused": None,
                         "phi_next": None,
                         "shaping_reward": self.invalid_reward,
+                        "fusion_method": "invalid_grm",
                         "mode_metrics": mode_records,
                         "valid_mode_count": 0,
                         "invalid_mode_count": len(self.modes),
                         "grm_latency_sec": float(sum(request_latencies)),
-                        "grm_latency_by_mode_sec": dict(
-                            zip(self.modes, request_latencies)
-                        ),
+                        "grm_latency_by_mode_sec": dict(zip(self.modes, request_latencies)),
                         "total_latency_sec": time.perf_counter() - env_start_time,
                     }
                 )
                 return self.invalid_reward
             phi_next = fused_phi
 
-        reward = self.gamma_eff * phi_next - prev_phi
-        self.prev_phi[env_idx] = float(phi_next)
-        self.previous_grm_obs[env_idx] = current_obs
+        potential_next = self.terminal_potential if episode_terminal else phi_next
+        reward = self.gamma_eff * potential_next - prev_phi
+        if not episode_terminal:
+            self.prev_phi[env_idx] = float(phi_next)
+            self.previous_grm_obs[env_idx] = current_obs
         valid_mode_count = len(valid_phis)
         self._write_metric_record(
             {
@@ -550,12 +642,20 @@ class DopamineGRMRewardModel(BaseRewardModel):
                 "call_count": call_count,
                 "task": task,
                 "success": success,
-                "valid": valid,
+                "done": done,
+                "episode_terminal": episode_terminal,
+                "valid": True,
                 "skipped": False,
                 "prev_phi": prev_phi,
                 "phi_fused": phi_next,
                 "phi_next": phi_next,
+                "potential_next_for_shaping": potential_next,
                 "shaping_reward": float(reward),
+                "fusion_method": fusion_method,
+                "consistency_applied": consistency_applied,
+                "global_mean_phi": global_mean,
+                "normalized_discrepancy": normalized_discrepancy,
+                "consistency_confidence": confidence,
                 "mode_metrics": mode_records,
                 "valid_mode_count": valid_mode_count,
                 "invalid_mode_count": len(self.modes) - valid_mode_count,
@@ -584,9 +684,12 @@ class DopamineGRMRewardModel(BaseRewardModel):
         rewards = torch.zeros(batch_size, dtype=torch.float32)
         for env_idx in range(batch_size):
             rewards[env_idx] = self._compute_env_reward(
-                observations, env_idx, bool(success[env_idx].item())
+                observations,
+                env_idx,
+                bool(success[env_idx].item()),
+                bool(dones_tensor[env_idx].item()),
             )
-            if bool(dones_tensor[env_idx].item()):
+            if bool(dones_tensor[env_idx].item()) or bool(success[env_idx].item()):
                 self.prev_phi[env_idx] = 0.0
                 self.has_prev_phi[env_idx] = False
                 self.previous_grm_obs[env_idx] = None
