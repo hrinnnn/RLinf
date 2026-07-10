@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -58,10 +60,15 @@ def _write_video(dataset: Any, path: Path, frame_count: int, fps: int) -> None:
 
     first = np.asarray(_to_uint8_image(dataset[0]))
     height, width = first.shape[:2]
+    # OSSFS does not reliably finalize MP4's moov index in-place. Encode locally,
+    # then copy the completed container to the persistent mount.
+    local_path = Path(tempfile.mkstemp(prefix="libero_grm_", suffix=".mp4")[1])
+    local_path.unlink()
     writer = cv2.VideoWriter(
-        str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
+        str(local_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
     )
     if not writer.isOpened():
+        local_path.unlink(missing_ok=True)
         raise RuntimeError(f"Cannot create video: {path}")
     try:
         for frame_idx in range(frame_count):
@@ -71,6 +78,9 @@ def _write_video(dataset: Any, path: Path, frame_count: int, fps: int) -> None:
             writer.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
     finally:
         writer.release()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(local_path, path)
+    local_path.unlink(missing_ok=True)
 
 
 def _segments(frame_count: int, segment_count: int) -> list[dict[str, Any]]:
