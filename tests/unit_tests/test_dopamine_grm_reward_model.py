@@ -21,6 +21,7 @@ from PIL import Image
 
 from rlinf.models.embodiment.reward.dopamine_grm_reward_model import (
     DopamineGRMRewardModel,
+    consistency_aware_phi,
     dopamine_grm_score_to_phi,
     parse_dopamine_grm_score,
 )
@@ -116,9 +117,28 @@ def test_three_mode_fusion_updates_prev_phi(tmp_path):
 
     reward = model.compute_reward(_obs())
 
-    phi_next = (0.5 + 0.6 + 0.8) / 3
+    # Eq. 9--11: mean global phi=.7, delta incremental=.5, w=exp(-1*(.2/.7)^2).
+    phi_next, _, _, _ = consistency_aware_phi(0.0, 0.5, 0.6, 0.8, 1.0, 1e-6)
     assert reward.item() == pytest.approx(0.99 * phi_next)
     assert model.prev_phi[0].item() == pytest.approx(phi_next)
+
+
+def test_consistency_aware_phi_matches_paper_equations():
+    phi, global_mean, discrepancy, confidence = consistency_aware_phi(
+        prev_phi=0.2,
+        incremental_phi=0.5,
+        forward_phi=0.4,
+        backward_phi=0.8,
+        alpha=2.0,
+        epsilon=1e-6,
+    )
+    assert global_mean == pytest.approx(0.6)
+    expected_discrepancy = 0.4 / (0.6 + 1e-6)
+    assert discrepancy == pytest.approx(expected_discrepancy)
+    assert confidence == pytest.approx(
+        torch.exp(torch.tensor(-2.0 * expected_discrepancy**2)).item()
+    )
+    assert phi == pytest.approx(0.2 + confidence / 2 * (0.6 - 0.2 + 0.3))
 
 
 def test_all_invalid_does_not_update_prev_phi(tmp_path):
@@ -138,15 +158,20 @@ def test_all_invalid_does_not_update_prev_phi(tmp_path):
     assert model.prev_phi[0].item() == prev_phi
 
 
-def test_success_overrides_phi_and_resets_on_done(tmp_path):
+def test_terminal_transition_uses_zero_potential_and_resets_on_done(tmp_path):
     model = FakeDopamineGRMRewardModel(
         _cfg(_write_goal_bank(tmp_path)),
-        responses=[["bad", "bad", "bad"]],
+        responses=[
+            ["<score>+50%</score>", "<score>+50%</score>", "<score>+50%</score>"],
+            ["bad", "bad", "bad"],
+        ],
     )
+    model.compute_reward(_obs())
+    prev_phi = model.prev_phi[0].item()
 
     reward = model.compute_reward(_obs(success=True, done=True))
 
-    assert reward.item() == pytest.approx(0.99)
+    assert reward.item() == pytest.approx(-prev_phi)
     assert model.prev_phi[0].item() == 0.0
     assert not model.has_prev_phi[0].item()
 
@@ -162,6 +187,6 @@ def test_low_frequency_skips_without_request(tmp_path):
     skipped = model.compute_reward(_obs())
     reward = model.compute_reward(_obs())
 
-    phi_next = (0.5 + 0.5 + 1.0) / 3
+    phi_next, _, _, _ = consistency_aware_phi(0.0, 0.5, 0.5, 1.0, 1.0, 1e-6)
     assert skipped.item() == 0.0
     assert reward.item() == pytest.approx((0.99**2) * phi_next)
