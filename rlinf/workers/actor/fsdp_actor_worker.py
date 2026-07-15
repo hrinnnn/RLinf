@@ -24,6 +24,10 @@ from torch.distributed.tensor import DTensor
 from torch.multiprocessing.reductions import reduce_tensor
 
 import rlinf.algorithms  # noqa: F401
+from rlinf.algorithms.diffdagger import (
+    combine_loss_masks,
+    intervention_keep_mask,
+)
 from rlinf.algorithms.registry import calculate_adv_and_returns, policy_loss
 from rlinf.algorithms.utils import (
     kl_penalty,
@@ -1188,6 +1192,22 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             rollout_batch["loss_mask"] = loss_mask
             rollout_batch["loss_mask_sum"] = loss_mask_sum
 
+        diffdagger_cfg = OmegaConf.select(
+            self.cfg, "algorithm.diffdagger", default=OmegaConf.create({})
+        )
+        if (
+            bool(diffdagger_cfg.get("enabled", False))
+            and bool(diffdagger_cfg.get("mask_interventions_from_ppo", True))
+            and rollout_batch.get("intervene_flags", None) is not None
+        ):
+            on_policy_mask = intervention_keep_mask(
+                rollout_batch["intervene_flags"],
+                reward_type=self.cfg.algorithm.reward_type,
+            )
+            rollout_batch["loss_mask"] = combine_loss_masks(
+                rollout_batch.get("loss_mask", None), on_policy_mask
+            )
+
         # filter data by rewards
         if self.cfg.algorithm.get("filter_rewards", False):
             rewards = rollout_batch[
@@ -1535,12 +1555,62 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         if self.enable_sft_co_train:
             loss = self._train_sft_epoch(metrics_data, loss)
 
+        loss = self._add_diffdagger_sft_loss(micro_batch, metrics_data, loss)
+
         loss /= self.gradient_accumulation
         with backward_ctx:
             self.grad_scaler.scale(loss).backward()
 
         metrics_data["actor/total_loss"] = loss.detach().item()
         append_to_dict(metrics, metrics_data)
+
+    def _add_diffdagger_sft_loss(
+        self,
+        micro_batch: dict[str, torch.Tensor],
+        metrics_data: dict[str, torch.Tensor | float],
+        loss: torch.Tensor,
+    ) -> torch.Tensor:
+        """Train queried chunks toward expert labels alongside on-policy PPO."""
+
+        diffdagger_cfg = OmegaConf.select(
+            self.cfg, "algorithm.diffdagger", default=OmegaConf.create({})
+        )
+        if not bool(diffdagger_cfg.get("enabled", False)):
+            return loss
+        coefficient = float(diffdagger_cfg.get("sft_loss_coef", 0.0))
+        if coefficient <= 0.0:
+            return loss
+        if SupportedModel(self.cfg.actor.model.model_type) != SupportedModel.OPENPI:
+            raise ValueError("DiffDAgger auxiliary SFT currently supports OpenPI only.")
+
+        intervene_flags = micro_batch.get("intervene_flags", None)
+        forward_inputs = micro_batch.get("forward_inputs", None)
+        if intervene_flags is None or not forward_inputs:
+            metrics_data["diffdagger/sft_samples"] = 0.0
+            metrics_data["diffdagger/sft_loss"] = 0.0
+            return loss
+
+        row_mask = intervene_flags.reshape(intervene_flags.shape[0], -1).any(dim=-1)
+        sample_count = int(row_mask.sum().item())
+        metrics_data["diffdagger/sft_samples"] = float(sample_count)
+        if sample_count == 0:
+            metrics_data["diffdagger/sft_loss"] = 0.0
+            return loss
+
+        selected_forward_inputs = {
+            key: value[row_mask]
+            for key, value in forward_inputs.items()
+            if isinstance(value, torch.Tensor) and value.shape[0] == row_mask.shape[0]
+        }
+        data = self.model.prepare_dagger_sft_batch(selected_forward_inputs)
+        sft_output = self.model(
+            forward_type=ForwardType.SFT,
+            data=data,
+            use_action_chunk_loss=True,
+        )
+        sft_loss = sft_output["loss"] if isinstance(sft_output, dict) else sft_output
+        metrics_data["diffdagger/sft_loss"] = sft_loss.detach().item()
+        return loss + coefficient * sft_loss
 
     def set_global_step(self, global_step: int) -> None:
         """

@@ -312,6 +312,25 @@ def compute_rollout_metrics(data_buffer: dict) -> dict:
         }
         rollout_metrics.update(returns_metrics)
 
+    if data_buffer.get("diffdagger_scores", None) is not None:
+        scores = data_buffer["diffdagger_scores"].reshape(-1)
+        mean_score, min_score, max_score = reduce_metrics(scores)
+        rollout_metrics.update(
+            {
+                "diffdagger/uncertainty_mean": mean_score,
+                "diffdagger/uncertainty_min": min_score,
+                "diffdagger/uncertainty_max": max_score,
+            }
+        )
+    if data_buffer.get("diffdagger_cdf_values", None) is not None:
+        cdf_values = data_buffer["diffdagger_cdf_values"].reshape(-1)
+        mean_cdf, _, _ = reduce_metrics(cdf_values)
+        rollout_metrics["diffdagger/cdf_mean"] = mean_cdf
+    if data_buffer.get("intervene_flags", None) is not None:
+        flags = data_buffer["intervene_flags"].to(torch.float32).reshape(-1)
+        intervention_rate, _, _ = reduce_metrics(flags)
+        rollout_metrics["diffdagger/intervention_rate"] = intervention_rate
+
     return rollout_metrics
 
 

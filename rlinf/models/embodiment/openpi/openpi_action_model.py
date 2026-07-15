@@ -922,6 +922,86 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         return actions, result
 
     @torch.no_grad()
+    def compute_diffdagger_uncertainty(
+        self,
+        env_obs: dict[str, Any],
+        model_actions: torch.Tensor,
+        *,
+        num_timesteps: int = 16,
+        num_noise_samples: int = 1,
+    ) -> torch.Tensor:
+        """Estimate DiffDAgger uncertainty from flow reconstruction loss.
+
+        DiffDAgger evaluates the diffusion training loss of the policy's own
+        generated action across noise levels.  For pi0/pi0.5, the matching
+        quantity is the flow-matching velocity MSE: generated actions are
+        interpolated with Gaussian noise at several times and the action expert
+        predicts the target velocity ``noise - action``.
+        """
+
+        if num_timesteps < 1 or num_noise_samples < 1:
+            raise ValueError(
+                "DiffDAgger num_timesteps and num_noise_samples must be positive."
+            )
+
+        from rlinf.algorithms.diffdagger import (
+            flow_matching_noisy_action_and_target,
+            flow_matching_reconstruction_mse,
+        )
+
+        to_process_obs = self.obs_processor(env_obs)
+        processed_obs = self.input_transform(to_process_obs, transpose=False)
+        processed_obs = self.precision_processor(processed_obs)
+        observation = _model.Observation.from_dict(processed_obs)
+        images, img_masks, lang_tokens, lang_masks, state = (
+            self._preprocess_observation(observation, train=False)
+        )
+
+        device = next(self.parameters()).device
+        images = [image.to(device) for image in images]
+        img_masks = [mask.to(device) for mask in img_masks]
+        state = state.to(device)
+        actions = torch.as_tensor(model_actions, device=device, dtype=torch.float32)
+        if actions.ndim == 2:
+            actions = actions.reshape(
+                actions.shape[0], self.config.action_horizon, self.config.action_dim
+            )
+        if actions.ndim != 3:
+            raise ValueError(
+                f"DiffDAgger model actions must be rank 2 or 3, got {actions.shape}."
+            )
+
+        _, prefix_pad_masks, past_key_values = self._build_prefix_cache(
+            images, img_masks, lang_tokens, lang_masks
+        )
+        # Midpoints avoid the singular endpoints while covering the full flow path.
+        timesteps = (
+            torch.arange(num_timesteps, device=device, dtype=actions.dtype) + 0.5
+        ) / num_timesteps
+        scores = torch.zeros(actions.shape[0], device=device, dtype=torch.float32)
+        for _ in range(num_noise_samples):
+            for timestep in timesteps:
+                noise = self.sample_noise(actions.shape, device).to(torch.float32)
+                batch_t = timestep.expand(actions.shape[0])
+                x_t, velocity_target = flow_matching_noisy_action_and_target(
+                    actions, noise, batch_t
+                )
+                velocity_prediction, _ = self.get_velocity(
+                    state,
+                    x_t,
+                    batch_t,
+                    prefix_pad_masks,
+                    past_key_values,
+                )
+                scores += flow_matching_reconstruction_mse(
+                    velocity_prediction,
+                    velocity_target,
+                    action_chunk=self.config.action_chunk,
+                    action_dim=self.config.action_env_dim,
+                )
+        return scores / float(num_timesteps * num_noise_samples)
+
+    @torch.no_grad()
     def sample_actions(
         self,
         observation: _model.Observation,

@@ -15,7 +15,9 @@
 import asyncio
 import copy
 import gc
+import json
 import time
+from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 import numpy as np
@@ -23,6 +25,11 @@ import torch
 from omegaconf import DictConfig, OmegaConf, open_dict
 from tqdm import tqdm
 
+from rlinf.algorithms.diffdagger import (
+    DiffDAggerQueryGate,
+    load_calibration_scores,
+    merge_expert_interventions,
+)
 from rlinf.algorithms.rlt import (
     build_expert_model_config,
     build_rlt_route,
@@ -79,6 +86,15 @@ class MultiStepRolloutWorker(Worker):
         self.expert_model = None
         self.rlt_feature_model = None
         self.rlt_route = None
+        self.diffdagger_cfg = OmegaConf.select(
+            cfg, "algorithm.diffdagger", default=OmegaConf.create({})
+        )
+        self.diffdagger_enabled = bool(self.diffdagger_cfg.get("enabled", False))
+        self.diffdagger_calibration_only = bool(
+            self.diffdagger_cfg.get("calibration_only", False)
+        )
+        self.diffdagger_gate: DiffDAggerQueryGate | None = None
+        self.diffdagger_calibration_output: Path | None = None
 
         self.total_num_train_envs = (
             cfg.env.train.total_num_envs if self.enable_train else 0
@@ -175,6 +191,61 @@ class MultiStepRolloutWorker(Worker):
         if self.rlt_feature_model is not None:
             self.rlt_feature_model.eval()
 
+        if self.diffdagger_enabled:
+            if SupportedModel(self.model_cfg.model_type) != SupportedModel.OPENPI:
+                raise ValueError("DiffDAgger flow loss currently supports OpenPI only.")
+            if self.expert_model is None and not self.diffdagger_calibration_only:
+                raise ValueError(
+                    "rollout.expert_model is required when algorithm.diffdagger.enabled=True."
+                )
+            if self.diffdagger_calibration_only:
+                output_path = self.diffdagger_cfg.get("calibration_output_path", None)
+                if not output_path:
+                    raise ValueError(
+                        "algorithm.diffdagger.calibration_output_path is required "
+                        "in calibration-only mode."
+                    )
+                output_path = str(output_path)
+                if "{rank}" in output_path:
+                    output_path = output_path.format(rank=self._rank)
+                else:
+                    path = Path(output_path)
+                    output_path = str(
+                        path.with_name(f"{path.stem}_rank{self._rank}{path.suffix}")
+                    )
+                self.diffdagger_calibration_output = Path(output_path).expanduser()
+                self.diffdagger_calibration_output.parent.mkdir(
+                    parents=True, exist_ok=True
+                )
+            else:
+                calibration_path = self.diffdagger_cfg.get("calibration_path", None)
+                if not calibration_path:
+                    raise ValueError(
+                        "algorithm.diffdagger.calibration_path must point to scores "
+                        "computed on in-distribution expert demonstrations."
+                    )
+                self.diffdagger_gate = DiffDAggerQueryGate(
+                    load_calibration_scores(calibration_path),
+                    alpha=float(self.diffdagger_cfg.get("alpha", 0.99)),
+                    patience=int(self.diffdagger_cfg.get("patience", 2)),
+                    patience_window=int(
+                        self.diffdagger_cfg.get(
+                            "patience_window", self.diffdagger_cfg.get("patience", 2)
+                        )
+                    ),
+                )
+
+        self._setup_model_acceleration()
+
+    def _append_diffdagger_calibration(self, scores: torch.Tensor) -> None:
+        if self.diffdagger_calibration_output is None:
+            raise RuntimeError("DiffDAgger calibration output is not initialized.")
+        with self.diffdagger_calibration_output.open("a", encoding="utf-8") as file:
+            for score in scores.detach().cpu().reshape(-1).tolist():
+                file.write(json.dumps({"score": float(score)}) + "\n")
+
+    def _setup_model_acceleration(self) -> None:
+        """Configure optional compile/cuda-graph acceleration after model setup."""
         if self.cfg.rollout.get("enable_torch_compile", False):
             mode = self.cfg.rollout.get(
                 "torch_compile_mode", "max-autotune-no-cudagraphs"
@@ -451,7 +522,7 @@ class MultiStepRolloutWorker(Worker):
         return AsyncRouteWork(works, lambda _: None)
 
     def update_dagger_beta(self):
-        if self.expert_model is None:
+        if self.expert_model is None or self.diffdagger_enabled:
             return
 
         if self._dagger_sampling_params["beta_schedule"] == "exponential":
@@ -503,7 +574,11 @@ class MultiStepRolloutWorker(Worker):
             "only_save_expert", True
         )
 
-        if mode == "train" and self.expert_model is not None:
+        use_classic_dagger = (
+            self.algorithm_cfg.get("loss_type", "actor") == "embodied_dagger"
+            and not self.diffdagger_enabled
+        )
+        if mode == "train" and self.expert_model is not None and use_classic_dagger:
             # training with expert model. Beta-probability acting.
             use_expert = torch.rand(1).item() < self._dagger_sampling_params["beta"]
         else:
@@ -530,6 +605,7 @@ class MultiStepRolloutWorker(Worker):
                 and not use_expert  # only re-label if not using expert
                 and self.expert_model is not None  # only re-label if expert exists
                 and mode == "train"  # only re-label in train mode
+                and use_classic_dagger
             ):
                 _, expert_result = self.expert_model.predict_action_batch(
                     env_obs=env_obs,
@@ -549,6 +625,79 @@ class MultiStepRolloutWorker(Worker):
         result["expert_label_flag"] = bool(expert_label_flag)
         return actions, result
 
+    def _predict_diffdagger_actions(
+        self,
+        env_obs: dict[str, Any],
+        *,
+        episode_done: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Run the student, query by flow loss, and selectively execute expert actions."""
+
+        if not self.diffdagger_calibration_only and (
+            self.diffdagger_gate is None or self.expert_model is None
+        ):
+            raise RuntimeError(
+                "DiffDAgger worker components have not been initialized."
+            )
+        with torch.no_grad():
+            student_actions, student_result = self.hf_model.predict_action_batch(
+                env_obs=env_obs,
+                mode="train",
+            )
+            model_actions = student_result["forward_inputs"]["model_action"]
+            scores = self.hf_model.compute_diffdagger_uncertainty(
+                env_obs,
+                model_actions,
+                num_timesteps=int(
+                    self.diffdagger_cfg.get("uncertainty_num_timesteps", 16)
+                ),
+                num_noise_samples=int(
+                    self.diffdagger_cfg.get("uncertainty_num_noise_samples", 1)
+                ),
+            )
+            if self.diffdagger_calibration_only:
+                self._append_diffdagger_calibration(scores)
+                student_result["intervene_flags"] = torch.zeros(
+                    student_actions.shape[0],
+                    self.model_cfg.num_action_chunks,
+                    dtype=torch.bool,
+                    device=student_actions.device,
+                )
+                student_result["diffdagger_scores"] = scores.detach().cpu()
+                return student_actions, student_result
+
+            assert self.diffdagger_gate is not None
+            decision = self.diffdagger_gate.decide(scores, reset_mask=episode_done)
+            query_mask = decision.query_mask
+            if query_mask.any():
+                expert_actions, expert_result = self.expert_model.predict_action_batch(
+                    env_obs=env_obs,
+                    mode="eval",
+                    compute_values=False,
+                )
+                actions, result = merge_expert_interventions(
+                    student_actions,
+                    student_result,
+                    expert_actions,
+                    expert_result,
+                    query_mask,
+                    num_action_chunks=self.model_cfg.num_action_chunks,
+                )
+            else:
+                actions, result = student_actions, student_result
+                result["intervene_flags"] = torch.zeros(
+                    student_actions.shape[0],
+                    self.model_cfg.num_action_chunks,
+                    dtype=torch.bool,
+                    device=student_actions.device,
+                )
+
+        # Kept outside forward_inputs so actor model transforms never see diagnostics.
+        result["diffdagger_scores"] = decision.scores.detach().cpu()
+        result["diffdagger_cdf_values"] = decision.cdf_values.detach().cpu()
+        result["diffdagger_threshold"] = decision.threshold
+        return actions, result
+
     def _predict_rollout_actions(
         self,
         env_obs: dict[str, Any],
@@ -556,7 +705,17 @@ class MultiStepRolloutWorker(Worker):
         final_obs: dict[str, Any] | None = None,
         rlt_switch_flags: torch.Tensor | None = None,
         intervene_requested: torch.Tensor | None = None,
+        episode_done: torch.Tensor | None = None,
+        enable_diffdagger: bool = True,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
+        should_run_diffdagger = self.diffdagger_enabled and (
+            mode == "train" or self.diffdagger_calibration_only
+        )
+        if should_run_diffdagger and enable_diffdagger:
+            return self._predict_diffdagger_actions(
+                env_obs,
+                episode_done=episode_done,
+            )
         if self.rlt_feature_model is not None:
             return predict_rlt_actions(
                 policy_model=self.hf_model,
@@ -593,6 +752,17 @@ class MultiStepRolloutWorker(Worker):
             prev_values=result["prev_values"] if self.collect_prev_infos else None,
             bootstrap_values=self.get_bootstrap_values(final_obs),
             intervene_flags=intervene_flags,
+            diffdagger_scores=result.get("diffdagger_scores", None),
+            diffdagger_cdf_values=result.get("diffdagger_cdf_values", None),
+            diffdagger_thresholds=(
+                torch.full(
+                    (actions.shape[0],),
+                    float(result["diffdagger_threshold"]),
+                    dtype=torch.float32,
+                )
+                if "diffdagger_threshold" in result
+                else None
+            ),
             forward_inputs=result["forward_inputs"],
             versions=torch.full_like(
                 result["prev_logprobs"],
@@ -611,7 +781,9 @@ class MultiStepRolloutWorker(Worker):
         ):
             return None
         with torch.no_grad():
-            actions, result = self._predict_rollout_actions(final_obs)
+            actions, result = self._predict_rollout_actions(
+                final_obs, enable_diffdagger=False
+            )
             if "prev_values" in result and result["prev_values"] is not None:
                 final_values = result["prev_values"]
             else:
@@ -685,6 +857,7 @@ class MultiStepRolloutWorker(Worker):
                     final_obs=env_output.get("final_obs", None),
                     rlt_switch_flags=env_output.get("rlt_switch_flags", None),
                     intervene_requested=env_output.get("intervene_flags", None),
+                    episode_done=env_output.get("dones", None),
                 )
 
                 rollout_result = self._build_rollout_result(
@@ -718,6 +891,7 @@ class MultiStepRolloutWorker(Worker):
                 final_obs=env_output.get("final_obs", None),
                 rlt_switch_flags=env_output.get("rlt_switch_flags", None),
                 intervene_requested=env_output.get("intervene_flags", None),
+                enable_diffdagger=False,
             )
 
             rollout_result = RolloutResult(
@@ -901,6 +1075,7 @@ class MultiStepRolloutWorker(Worker):
         intervene_flags_list = [
             obs_batch.get("intervene_flags", None) for obs_batch in obs_batches
         ]
+        dones_list = [obs_batch.get("dones", None) for obs_batch in obs_batches]
 
         def _merge_obs_dicts(dicts: list[dict[str, Any]]) -> dict[str, Any]:
             merged: dict[str, Any] = {}
@@ -937,6 +1112,7 @@ class MultiStepRolloutWorker(Worker):
             "intervene_flags": self._merge_optional_flag_tensors(
                 obs_dicts, intervene_flags_list
             ),
+            "dones": self._merge_optional_flag_tensors(obs_dicts, dones_list),
         }
 
     def _split_rollout_result(
@@ -954,6 +1130,15 @@ class MultiStepRolloutWorker(Worker):
         split_prev_values = _split_optional_tensor(rollout_result.prev_values)
         split_bootstrap_values = _split_optional_tensor(rollout_result.bootstrap_values)
         split_intervene_flags = _split_optional_tensor(rollout_result.intervene_flags)
+        split_diffdagger_scores = _split_optional_tensor(
+            rollout_result.diffdagger_scores
+        )
+        split_diffdagger_cdf_values = _split_optional_tensor(
+            rollout_result.diffdagger_cdf_values
+        )
+        split_diffdagger_thresholds = _split_optional_tensor(
+            rollout_result.diffdagger_thresholds
+        )
         split_versions = _split_optional_tensor(rollout_result.versions)
         split_forward_inputs = (
             [{} for _ in sizes]
@@ -975,6 +1160,9 @@ class MultiStepRolloutWorker(Worker):
                 prev_values=split_prev_values[idx],
                 bootstrap_values=split_bootstrap_values[idx],
                 intervene_flags=split_intervene_flags[idx],
+                diffdagger_scores=split_diffdagger_scores[idx],
+                diffdagger_cdf_values=split_diffdagger_cdf_values[idx],
+                diffdagger_thresholds=split_diffdagger_thresholds[idx],
                 forward_inputs=split_forward_inputs[idx],
                 versions=split_versions[idx],
             )

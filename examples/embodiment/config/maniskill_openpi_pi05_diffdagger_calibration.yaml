@@ -1,0 +1,50 @@
+defaults:
+  - env/maniskill_put_on_plate_in_scene_25_main@env.train
+  - env/maniskill_put_on_plate_in_scene_25_main@env.eval
+  - model/pi0_5@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - experiment/maniskill_pi05_flow_sde_base@_global_
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+runner:
+  only_eval: true
+  val_check_interval: 1
+  logger:
+    experiment_name: "maniskill_openpi_pi05_diffdagger_calibration"
+
+algorithm:
+  diffdagger:
+    enabled: true
+    calibration_only: true
+    calibration_output_path: ${oc.env:DIFFDAGGER_CALIBRATION_OUTPUT,../results/diffdagger_calibration.jsonl}
+    uncertainty_num_timesteps: 16
+    uncertainty_num_noise_samples: 1
+
+env:
+  eval:
+    total_num_envs: 8
+    rollout_epoch: 1
+    video_cfg:
+      save_video: false
+
+rollout:
+  model:
+    model_type: "openpi"
+    model_path: ${oc.env:PI05_MODEL_PATH,/path/to/pi05-base-or-sft}
+    precision: ${actor.model.precision}
+    num_action_chunks: ${actor.model.num_action_chunks}
+    action_dim: ${actor.model.action_dim}
+    use_proprio: ${actor.model.use_proprio}
+    num_steps: ${actor.model.num_steps}
+    add_value_head: ${actor.model.add_value_head}
+    policy_setup: ${actor.model.policy_setup}
+    openpi: ${actor.model.openpi}

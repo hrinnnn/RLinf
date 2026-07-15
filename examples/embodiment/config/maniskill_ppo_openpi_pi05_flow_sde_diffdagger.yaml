@@ -1,0 +1,38 @@
+defaults:
+  - env/maniskill_put_on_plate_in_scene_25_main@env.train
+  - env/maniskill_put_on_plate_in_scene_25_main@env.eval
+  - model/pi0_5@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - experiment/maniskill_pi05_flow_sde_base@_global_
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+runner:
+  logger:
+    experiment_name: "maniskill_ppo_openpi_pi05_flow_sde_diffdagger"
+
+algorithm:
+  diffdagger:
+    enabled: true
+    calibration_only: false
+    calibration_path: ${oc.env:DIFFDAGGER_CALIBRATION_PATH,/path/to/diffdagger_scores.jsonl}
+    alpha: 0.99
+    uncertainty_num_timesteps: 16
+    uncertainty_num_noise_samples: 1
+    patience: 2
+    patience_window: 2
+    mask_interventions_from_ppo: true
+    sft_loss_coef: 1.0
+
+rollout:
+  expert_model:
+    model_path: ${oc.env:DIFFDAGGER_EXPERT_MODEL_PATH,/path/to/pi05-maniskill-expert}
+    precision: ${actor.model.precision}

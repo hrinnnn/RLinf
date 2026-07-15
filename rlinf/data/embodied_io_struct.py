@@ -296,6 +296,9 @@ class RolloutResult:
 
     bootstrap_values: torch.Tensor = None  # [B, 1]
     intervene_flags: torch.Tensor = None  # [B, num_action_chunks]
+    diffdagger_scores: torch.Tensor = None  # [B]
+    diffdagger_cdf_values: torch.Tensor = None  # [B]
+    diffdagger_thresholds: torch.Tensor = None  # [B]
     forward_inputs: dict[str, torch.Tensor] = field(default_factory=dict)
     versions: torch.Tensor = None  # [B, 1]
 
@@ -310,6 +313,12 @@ class RolloutResult:
             self.bootstrap_values = self.bootstrap_values.cpu().contiguous()
         if self.intervene_flags is not None:
             self.intervene_flags = self.intervene_flags.cpu().contiguous()
+        if self.diffdagger_scores is not None:
+            self.diffdagger_scores = self.diffdagger_scores.cpu().contiguous()
+        if self.diffdagger_cdf_values is not None:
+            self.diffdagger_cdf_values = self.diffdagger_cdf_values.cpu().contiguous()
+        if self.diffdagger_thresholds is not None:
+            self.diffdagger_thresholds = self.diffdagger_thresholds.cpu().contiguous()
         if self.forward_inputs:
             self.forward_inputs = put_tensor_device(self.forward_inputs, "cpu")
         if self.versions is not None:
@@ -337,6 +346,9 @@ class RolloutResult:
         merged_prev_values = _merge_optional_tensor("prev_values")
         merged_bootstrap_values = _merge_optional_tensor("bootstrap_values")
         merged_intervene_flags = _merge_optional_tensor("intervene_flags")
+        merged_diffdagger_scores = _merge_optional_tensor("diffdagger_scores")
+        merged_diffdagger_cdf_values = _merge_optional_tensor("diffdagger_cdf_values")
+        merged_diffdagger_thresholds = _merge_optional_tensor("diffdagger_thresholds")
         merged_versions = _merge_optional_tensor("versions")
 
         forward_inputs_list = [
@@ -353,6 +365,9 @@ class RolloutResult:
             prev_values=merged_prev_values,
             bootstrap_values=merged_bootstrap_values,
             intervene_flags=merged_intervene_flags,
+            diffdagger_scores=merged_diffdagger_scores,
+            diffdagger_cdf_values=merged_diffdagger_cdf_values,
+            diffdagger_thresholds=merged_diffdagger_thresholds,
             forward_inputs=merged_forward_inputs,
             versions=merged_versions,
         )
@@ -369,6 +384,9 @@ class ChunkStepResult:
     truncations: torch.Tensor = None  # [B, 1]
     terminations: torch.Tensor = None  # [B, 1]
     rewards: torch.Tensor = None  # [B, 1]
+    diffdagger_scores: torch.Tensor = None  # [B]
+    diffdagger_cdf_values: torch.Tensor = None  # [B]
+    diffdagger_thresholds: torch.Tensor = None  # [B]
     forward_inputs: dict[str, torch.Tensor] = field(default_factory=dict)
     versions: torch.Tensor = None  # [B, 1]
 
@@ -387,6 +405,12 @@ class ChunkStepResult:
             self.truncations = self.truncations.cpu().contiguous()
         if self.rewards is not None:
             self.rewards = self.rewards.cpu().contiguous()
+        if self.diffdagger_scores is not None:
+            self.diffdagger_scores = self.diffdagger_scores.cpu().contiguous()
+        if self.diffdagger_cdf_values is not None:
+            self.diffdagger_cdf_values = self.diffdagger_cdf_values.cpu().contiguous()
+        if self.diffdagger_thresholds is not None:
+            self.diffdagger_thresholds = self.diffdagger_thresholds.cpu().contiguous()
         if self.forward_inputs:
             self.forward_inputs = put_tensor_device(self.forward_inputs, "cpu")
         if self.versions is not None:
@@ -403,6 +427,9 @@ class Trajectory:
     model_weights_id: str = ""  # str(uuid(versions))
     actions: torch.Tensor = None
     intervene_flags: torch.Tensor = None
+    diffdagger_scores: torch.Tensor = None
+    diffdagger_cdf_values: torch.Tensor = None
+    diffdagger_thresholds: torch.Tensor = None
     rewards: torch.Tensor = None
     terminations: torch.Tensor = None
     truncations: torch.Tensor = None
@@ -492,6 +519,9 @@ class Trajectory:
             prev_logprobs = apply_mask(self.prev_logprobs, i)
             prev_values = apply_mask(self.prev_values, i)
             intervene_flags = apply_mask(self.intervene_flags, i)
+            diffdagger_scores = apply_mask(self.diffdagger_scores, i)
+            diffdagger_cdf_values = apply_mask(self.diffdagger_cdf_values, i)
+            diffdagger_thresholds = apply_mask(self.diffdagger_thresholds, i)
 
             forward_inputs = apply_mask_to_dict(self.forward_inputs, i)
             curr_obs = apply_mask_to_dict(self.curr_obs, i)
@@ -512,6 +542,9 @@ class Trajectory:
                     model_weights_id=self.model_weights_id,
                     actions=actions,
                     intervene_flags=intervene_flags,
+                    diffdagger_scores=diffdagger_scores,
+                    diffdagger_cdf_values=diffdagger_cdf_values,
+                    diffdagger_thresholds=diffdagger_thresholds,
                     rewards=rewards,
                     terminations=terminations,
                     truncations=truncations,
@@ -540,6 +573,9 @@ class EmbodiedRolloutResult:
     intervene_flags: list[torch.Tensor] = field(
         default_factory=list
     )  # trajectory_length
+    diffdagger_scores: list[torch.Tensor] = field(default_factory=list)
+    diffdagger_cdf_values: list[torch.Tensor] = field(default_factory=list)
+    diffdagger_thresholds: list[torch.Tensor] = field(default_factory=list)
     rewards: list[torch.Tensor] = field(default_factory=list)  # trajectory_length
     terminations: list[torch.Tensor] = field(
         default_factory=list
@@ -570,6 +606,12 @@ class EmbodiedRolloutResult:
             )
         if result.rewards is not None:
             self.rewards.append(result.rewards)
+        if result.diffdagger_scores is not None:
+            self.diffdagger_scores.append(result.diffdagger_scores)
+        if result.diffdagger_cdf_values is not None:
+            self.diffdagger_cdf_values.append(result.diffdagger_cdf_values)
+        if result.diffdagger_thresholds is not None:
+            self.diffdagger_thresholds.append(result.diffdagger_thresholds)
         if result.terminations is not None:
             self.terminations.append(result.terminations)
         if result.truncations is not None:
@@ -657,6 +699,9 @@ class EmbodiedRolloutResult:
     def clear(self):
         self.actions.clear()
         self.intervene_flags.clear()
+        self.diffdagger_scores.clear()
+        self.diffdagger_cdf_values.clear()
+        self.diffdagger_thresholds.clear()
         self.rewards.clear()
         self.terminations.clear()
         self.truncations.clear()
@@ -678,6 +723,18 @@ class EmbodiedRolloutResult:
         if len(self.intervene_flags) > 0:
             trajectory.intervene_flags = (
                 torch.stack(self.intervene_flags, dim=0).cpu().contiguous()
+            )
+        if len(self.diffdagger_scores) > 0:
+            trajectory.diffdagger_scores = (
+                torch.stack(self.diffdagger_scores, dim=0).cpu().contiguous()
+            )
+        if len(self.diffdagger_cdf_values) > 0:
+            trajectory.diffdagger_cdf_values = (
+                torch.stack(self.diffdagger_cdf_values, dim=0).cpu().contiguous()
+            )
+        if len(self.diffdagger_thresholds) > 0:
+            trajectory.diffdagger_thresholds = (
+                torch.stack(self.diffdagger_thresholds, dim=0).cpu().contiguous()
             )
         if len(self.rewards) > 0:
             trajectory.rewards = torch.stack(self.rewards, dim=0).cpu().contiguous()

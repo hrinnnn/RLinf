@@ -89,6 +89,9 @@ class EnvWorker(Worker):
         self.enable_rlt = (
             OmegaConf.select(self.cfg, "algorithm.loss_type", default="") == "rlt_ac"
         )
+        self.diffdagger_enabled = bool(
+            OmegaConf.select(self.cfg, "algorithm.diffdagger.enabled", default=False)
+        )
 
         self.reward_mode = self.cfg.get("reward", {}).get("reward_mode", "per_step")
         self.history_reward_assign = self.cfg.get("reward", {}).get(
@@ -936,6 +939,8 @@ class EnvWorker(Worker):
         if self.enable_rlt:
             data["rlt_switch_flags"] = env_batch.get("rlt_switch_flags", None)
             data["intervene_flags"] = env_batch.get("intervene_flags", None)
+        if getattr(self, "diffdagger_enabled", False):
+            data["dones"] = env_batch.get("dones", None)
         return data
 
     def _send_train_bootstrap(
@@ -1097,6 +1102,9 @@ class EnvWorker(Worker):
                         truncations=env_output.truncations,
                         terminations=env_output.terminations,
                         rewards=rewards,
+                        diffdagger_scores=rollout_result.diffdagger_scores,
+                        diffdagger_cdf_values=rollout_result.diffdagger_cdf_values,
+                        diffdagger_thresholds=rollout_result.diffdagger_thresholds,
                     )
 
                     self.rollout_results[stage_id].append_step_result(chunk_step_result)
