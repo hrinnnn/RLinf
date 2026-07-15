@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
 
 from rlinf.algorithms.diffdagger import (
     DiffDAggerQueryGate,
@@ -17,6 +18,48 @@ from rlinf.algorithms.diffdagger import (
     merge_expert_interventions,
 )
 from rlinf.data.embodied_io_struct import ChunkStepResult, EmbodiedRolloutResult
+from rlinf.workers.rollout.hf.huggingface_worker import MultiStepRolloutWorker
+
+
+class _FakeStudent:
+    def predict_action_batch(self, env_obs, mode):
+        del env_obs, mode
+        actions = torch.zeros(2, 2, 2)
+        return actions, {
+            "prev_logprobs": torch.zeros(2, 2, 2),
+            "prev_values": torch.zeros(2, 1),
+            "forward_inputs": {
+                "action": torch.zeros(2, 4),
+                "model_action": torch.ones(2, 4),
+                "chains": torch.arange(2)[:, None],
+            },
+        }
+
+    def compute_diffdagger_uncertainty(
+        self, env_obs, model_actions, *, num_timesteps, num_noise_samples
+    ):
+        del env_obs, model_actions
+        assert num_timesteps == 4
+        assert num_noise_samples == 2
+        return torch.tensor([0.1, 0.4])
+
+
+class _FakeExpert:
+    def __init__(self):
+        self.calls = 0
+
+    def predict_action_batch(self, env_obs, mode, compute_values):
+        del env_obs
+        assert mode == "eval"
+        assert compute_values is False
+        self.calls += 1
+        actions = torch.full((2, 2, 2), 9.0)
+        return actions, {
+            "forward_inputs": {
+                "action": torch.full((2, 4), 7.0),
+                "model_action": torch.full((2, 4), 8.0),
+            }
+        }
 
 
 def test_load_calibration_scores_json_and_jsonl(tmp_path):
@@ -117,6 +160,34 @@ def test_merge_expert_interventions_replaces_only_queried_rows_and_labels():
         [True, True],
         [False, False],
     ]
+
+
+def test_rollout_worker_queries_and_replaces_only_uncertain_environment():
+    worker = object.__new__(MultiStepRolloutWorker)
+    worker.diffdagger_calibration_only = False
+    worker.diffdagger_cfg = OmegaConf.create(
+        {"uncertainty_num_timesteps": 4, "uncertainty_num_noise_samples": 2}
+    )
+    worker.diffdagger_gate = DiffDAggerQueryGate(
+        [0.1, 0.2, 0.3], alpha=0.5, patience=1, patience_window=1
+    )
+    worker.model_cfg = OmegaConf.create({"num_action_chunks": 2})
+    worker.hf_model = _FakeStudent()
+    worker.expert_model = _FakeExpert()
+
+    actions, result = worker._predict_diffdagger_actions({"states": torch.zeros(2, 1)})
+
+    torch.testing.assert_close(actions[0], torch.zeros(2, 2))
+    torch.testing.assert_close(actions[1], torch.full((2, 2), 9.0))
+    torch.testing.assert_close(
+        result["forward_inputs"]["model_action"][1], torch.full((4,), 8.0)
+    )
+    torch.testing.assert_close(
+        result["forward_inputs"]["chains"], torch.arange(2)[:, None]
+    )
+    assert result["intervene_flags"].tolist() == [[False, False], [True, True]]
+    assert result["diffdagger_cdf_values"].tolist() == pytest.approx([1 / 3, 1.0])
+    assert worker.expert_model.calls == 1
 
 
 def test_interventions_are_excluded_from_chunk_level_ppo_mask():
