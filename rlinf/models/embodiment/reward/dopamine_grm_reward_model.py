@@ -147,9 +147,7 @@ def consistency_aware_phi(
     discrepancy = abs(backward_phi - forward_phi) / (global_mean + epsilon)
     confidence = float(np.exp(-alpha * discrepancy**2))
     incremental_delta = incremental_phi - prev_phi
-    phi = prev_phi + confidence / 2.0 * (
-        global_mean - prev_phi + incremental_delta
-    )
+    phi = prev_phi + confidence / 2.0 * (global_mean - prev_phi + incremental_delta)
     return (
         float(np.clip(phi, phi_clip[0], phi_clip[1])),
         float(global_mean),
@@ -235,7 +233,22 @@ class DopamineGRMRewardModel(BaseRewardModel):
         self.modes = list(cfg.get("modes", ["incremental", "forward", "backward"]))
         self.gamma = float(cfg.get("gamma", 0.99))
         self.grm_interval_chunks = max(1, int(cfg.get("grm_interval_chunks", 1)))
-        self.gamma_eff = self.gamma**self.grm_interval_chunks
+        self.reward_output_mode = str(cfg.get("reward_output_mode", "scalar"))
+        self.num_action_chunks = int(cfg.get("num_action_chunks", 1))
+        if self.reward_output_mode not in {"scalar", "chunk_first"}:
+            raise ValueError(
+                "reward_output_mode must be 'scalar' or 'chunk_first', got "
+                f"{self.reward_output_mode!r}"
+            )
+        if self.reward_output_mode == "chunk_first":
+            if self.num_action_chunks < 1:
+                raise ValueError("num_action_chunks must be positive for chunk_first")
+            if self.grm_interval_chunks != 1:
+                raise ValueError(
+                    "ManiSkill chunk-level PBRS currently requires "
+                    "grm_interval_chunks=1. Delayed K-chunk shaping is not "
+                    "policy invariant for the one-transition-per-chunk RLT replay."
+                )
         self.invalid_reward = float(cfg.get("invalid_reward", 0.0))
         self.enable_consistency_check = bool(cfg.get("consistency_check", True))
         self.consistency_alpha = float(cfg.get("consistency_alpha", 1.0))
@@ -248,7 +261,9 @@ class DopamineGRMRewardModel(BaseRewardModel):
         self.temperature = float(cfg.get("temperature", 0.0))
         self.num_envs = int(cfg.get("num_envs", 1))
         metrics_log_path = cfg.get("metrics_log_path", None)
-        self.metrics_log_path = Path(str(metrics_log_path)) if metrics_log_path else None
+        self.metrics_log_path = (
+            Path(str(metrics_log_path)) if metrics_log_path else None
+        )
         if self.metrics_log_path is not None:
             self.metrics_log_path.parent.mkdir(parents=True, exist_ok=True)
         self.prev_phi = torch.zeros(self.num_envs, dtype=torch.float32)
@@ -256,6 +271,10 @@ class DopamineGRMRewardModel(BaseRewardModel):
         self.reward_call_counts = torch.zeros(self.num_envs, dtype=torch.long)
         self.previous_grm_obs: list[dict[str, Any] | None] = [None] * self.num_envs
         self.goal_bank = self._load_goal_bank(self.goal_bank_dir)
+        if not self.goal_bank:
+            raise FileNotFoundError(
+                f"Dopamine GRM requires a non-empty goal bank at {self.goal_bank_dir}"
+            )
 
     def forward(
         self, input_data: torch.Tensor, labels: torch.Tensor | None = None
@@ -265,11 +284,10 @@ class DopamineGRMRewardModel(BaseRewardModel):
         )
 
     def _load_goal_bank(self, goal_bank_dir: Path) -> dict[str, dict[str, Any]]:
-        if not goal_bank_dir:
-            return {}
         if not goal_bank_dir.exists():
-            logger.warning("Dopamine GRM goal bank does not exist: %s", goal_bank_dir)
-            return {}
+            raise FileNotFoundError(
+                f"Dopamine GRM goal bank does not exist: {goal_bank_dir}"
+            )
         goal_bank: dict[str, dict[str, Any]] = {}
         for meta_path in goal_bank_dir.glob("task_*/meta.json"):
             with open(meta_path, encoding="utf-8") as file:
@@ -285,6 +303,14 @@ class DopamineGRMRewardModel(BaseRewardModel):
                     meta_path.parent / views["wrist"] if views.get("wrist") else None
                 ),
             }
+            if not entry["main"].is_file():
+                raise FileNotFoundError(
+                    f"Dopamine GRM goal main image does not exist: {entry['main']}"
+                )
+            if entry["wrist"] is not None and not entry["wrist"].is_file():
+                raise FileNotFoundError(
+                    f"Dopamine GRM goal wrist image does not exist: {entry['wrist']}"
+                )
             if task_id is not None:
                 goal_bank[f"id:{int(task_id)}"] = entry
             if task_description:
@@ -403,7 +429,9 @@ class DopamineGRMRewardModel(BaseRewardModel):
                 )
         return [{"role": "user", "content": content}]
 
-    def _request_grm(self, payloads: list[dict[str, Any]]) -> tuple[list[str], list[float]]:
+    def _request_grm(
+        self, payloads: list[dict[str, Any]]
+    ) -> tuple[list[str], list[float]]:
         if not self.endpoint:
             raise ValueError("reward.model.grm_endpoint must be set for dopamine_grm")
         outputs = []
@@ -470,8 +498,11 @@ class DopamineGRMRewardModel(BaseRewardModel):
         env_idx: int,
         success: bool,
         done: bool,
+        actual_chunk_steps: int,
     ) -> float:
         episode_terminal = bool(done or success)
+        gamma_horizon = actual_chunk_steps * self.grm_interval_chunks
+        gamma_eff = self.gamma**gamma_horizon
         self.reward_call_counts[env_idx] += 1
         call_count = int(self.reward_call_counts[env_idx].item())
         if (
@@ -580,7 +611,7 @@ class DopamineGRMRewardModel(BaseRewardModel):
             if fused_phi is None:
                 if done:
                     # A zero terminal potential preserves the finite-episode PBRS boundary.
-                    reward = self.gamma_eff * self.terminal_potential - prev_phi
+                    reward = gamma_eff * self.terminal_potential - prev_phi
                     self._write_metric_record(
                         {
                             "env_idx": env_idx,
@@ -594,13 +625,18 @@ class DopamineGRMRewardModel(BaseRewardModel):
                             "phi_fused": None,
                             "phi_next": None,
                             "potential_next_for_shaping": self.terminal_potential,
+                            "actual_chunk_steps": actual_chunk_steps,
+                            "gamma_horizon": gamma_horizon,
+                            "gamma_eff": gamma_eff,
                             "shaping_reward": reward,
                             "fusion_method": "terminal_boundary_invalid_grm",
                             "mode_metrics": mode_records,
                             "valid_mode_count": 0,
                             "invalid_mode_count": len(self.modes),
                             "grm_latency_sec": float(sum(request_latencies)),
-                            "grm_latency_by_mode_sec": dict(zip(self.modes, request_latencies)),
+                            "grm_latency_by_mode_sec": dict(
+                                zip(self.modes, request_latencies)
+                            ),
                             "total_latency_sec": time.perf_counter() - env_start_time,
                         }
                     )
@@ -623,7 +659,9 @@ class DopamineGRMRewardModel(BaseRewardModel):
                         "valid_mode_count": 0,
                         "invalid_mode_count": len(self.modes),
                         "grm_latency_sec": float(sum(request_latencies)),
-                        "grm_latency_by_mode_sec": dict(zip(self.modes, request_latencies)),
+                        "grm_latency_by_mode_sec": dict(
+                            zip(self.modes, request_latencies)
+                        ),
                         "total_latency_sec": time.perf_counter() - env_start_time,
                     }
                 )
@@ -631,7 +669,7 @@ class DopamineGRMRewardModel(BaseRewardModel):
             phi_next = fused_phi
 
         potential_next = self.terminal_potential if episode_terminal else phi_next
-        reward = self.gamma_eff * potential_next - prev_phi
+        reward = gamma_eff * potential_next - prev_phi
         if not episode_terminal:
             self.prev_phi[env_idx] = float(phi_next)
             self.previous_grm_obs[env_idx] = current_obs
@@ -650,6 +688,9 @@ class DopamineGRMRewardModel(BaseRewardModel):
                 "phi_fused": phi_next,
                 "phi_next": phi_next,
                 "potential_next_for_shaping": potential_next,
+                "actual_chunk_steps": actual_chunk_steps,
+                "gamma_horizon": gamma_horizon,
+                "gamma_eff": gamma_eff,
                 "shaping_reward": float(reward),
                 "fusion_method": fusion_method,
                 "consistency_applied": consistency_applied,
@@ -666,6 +707,55 @@ class DopamineGRMRewardModel(BaseRewardModel):
         )
         return float(reward)
 
+    def _chunk_metadata(
+        self, observations: dict[str, Any], batch_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        chunk_dones = observations.get("chunk_dones")
+        if chunk_dones is None:
+            dones = observations.get("dones")
+            done_tensor = (
+                torch.as_tensor(dones).reshape(-1).bool().cpu()
+                if dones is not None
+                else torch.zeros(batch_size, dtype=torch.bool)
+            )
+            default_steps = (
+                self.num_action_chunks
+                if self.reward_output_mode == "chunk_first"
+                else 1
+            )
+            return done_tensor, torch.full(
+                (batch_size,), default_steps, dtype=torch.long
+            )
+
+        chunk_dones_tensor = torch.as_tensor(chunk_dones).bool().cpu()
+        if chunk_dones_tensor.ndim == 1:
+            chunk_dones_tensor = chunk_dones_tensor.unsqueeze(-1)
+        if chunk_dones_tensor.shape[0] != batch_size:
+            raise ValueError(
+                "chunk_dones batch mismatch: expected "
+                f"{batch_size}, got {tuple(chunk_dones_tensor.shape)}"
+            )
+        if (
+            self.reward_output_mode == "chunk_first"
+            and chunk_dones_tensor.shape[1] != self.num_action_chunks
+        ):
+            raise ValueError(
+                "chunk_dones width mismatch: expected num_action_chunks="
+                f"{self.num_action_chunks}, got {chunk_dones_tensor.shape[1]}"
+            )
+
+        done_tensor = chunk_dones_tensor.any(dim=1)
+        actual_steps = torch.full(
+            (batch_size,), chunk_dones_tensor.shape[1], dtype=torch.long
+        )
+        for env_idx in range(batch_size):
+            done_indices = torch.nonzero(
+                chunk_dones_tensor[env_idx], as_tuple=False
+            ).reshape(-1)
+            if done_indices.numel() > 0:
+                actual_steps[env_idx] = int(done_indices[0].item()) + 1
+        return done_tensor, actual_steps
+
     @torch.no_grad()
     def compute_reward(self, observations: dict[str, Any]) -> torch.Tensor:
         batch_size = self._batch_size(observations)
@@ -675,20 +765,27 @@ class DopamineGRMRewardModel(BaseRewardModel):
                 f"{batch_size}, but num_envs={self.num_envs}"
             )
         success = self._extract_success(observations, batch_size)
-        dones = observations.get("dones")
-        dones_tensor = (
-            torch.as_tensor(dones).reshape(-1).bool().cpu()
-            if dones is not None
-            else torch.zeros(batch_size, dtype=torch.bool)
+        dones_tensor, actual_chunk_steps = self._chunk_metadata(
+            observations, batch_size
         )
-        rewards = torch.zeros(batch_size, dtype=torch.float32)
+        if self.reward_output_mode == "chunk_first":
+            rewards = torch.zeros(
+                (batch_size, self.num_action_chunks), dtype=torch.float32
+            )
+        else:
+            rewards = torch.zeros(batch_size, dtype=torch.float32)
         for env_idx in range(batch_size):
-            rewards[env_idx] = self._compute_env_reward(
+            shaping_reward = self._compute_env_reward(
                 observations,
                 env_idx,
                 bool(success[env_idx].item()),
                 bool(dones_tensor[env_idx].item()),
+                int(actual_chunk_steps[env_idx].item()),
             )
+            if self.reward_output_mode == "chunk_first":
+                rewards[env_idx, 0] = shaping_reward
+            else:
+                rewards[env_idx] = shaping_reward
             if bool(dones_tensor[env_idx].item()) or bool(success[env_idx].item()):
                 self.prev_phi[env_idx] = 0.0
                 self.has_prev_phi[env_idx] = False

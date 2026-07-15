@@ -117,6 +117,9 @@ class EnvOutput:
             if "task_descriptions" in obs and obs["task_descriptions"] is not None
             else None
         )
+        task_ids = obs.get("task_ids")
+        reference_start_main_images = obs.get("reference_start_main_images")
+        reference_start_wrist_images = obs.get("reference_start_wrist_images")
 
         return {
             "main_images": image_tensor,  # [N_ENV, H, W, C]
@@ -124,6 +127,9 @@ class EnvOutput:
             "extra_view_images": extra_view_image_tensor,  # [N_ENV, N_IMG, H, W, C]
             "states": states,
             "task_descriptions": task_descriptions,
+            "task_ids": task_ids,
+            "reference_start_main_images": reference_start_main_images,
+            "reference_start_wrist_images": reference_start_wrist_images,
         }
 
     @staticmethod

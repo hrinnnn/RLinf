@@ -182,6 +182,7 @@ def wrap_rlt_openpi_joint_obs(
             device=device,
         ),
         "task_descriptions": task_descriptions,
+        "task_ids": torch.zeros(num_envs, dtype=torch.long, device=device),
     }
 
 

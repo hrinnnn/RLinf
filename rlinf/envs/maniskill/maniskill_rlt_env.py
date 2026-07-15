@@ -129,6 +129,7 @@ class ManiskillRLTEnv(ManiskillEnv):
         self._rlt_switch_cfg = getattr(cfg, "rlt_policy_switch", None)
         self._rlt_switch_state: dict[str, torch.Tensor] | None = None
         self._rlt_hole_radius_values: torch.Tensor | None = None
+        self.reference_start_obs: dict[str, torch.Tensor] | None = None
 
         with open_dict(cfg):
             cfg.init_params.num_envs = num_envs
@@ -762,6 +763,47 @@ class ManiskillRLTEnv(ManiskillEnv):
             )
         return super()._wrap_obs(raw_obs, infos=infos)
 
+    def _update_reference_start_obs(self, obs, env_idx=None) -> None:
+        if "main_images" not in obs:
+            return
+        keys = ("main_images", "wrist_images")
+        if self.reference_start_obs is None or env_idx is None:
+            self.reference_start_obs = {
+                key: obs[key].detach().clone()
+                for key in keys
+                if obs.get(key) is not None
+            }
+            return
+
+        for key in keys:
+            if key not in self.reference_start_obs or obs.get(key) is None:
+                continue
+            index = env_idx
+            if isinstance(index, torch.Tensor):
+                index = index.to(device=self.reference_start_obs[key].device)
+            source = obs[key]
+            if source.shape[0] == self.reference_start_obs[key].shape[0]:
+                source_index = env_idx
+                if isinstance(source_index, torch.Tensor):
+                    source_index = source_index.to(device=source.device)
+                source = source[source_index]
+            self.reference_start_obs[key][index] = source.detach().clone()
+
+    def _attach_reference_start_obs(self, obs):
+        if "main_images" not in obs:
+            return obs
+        reference = self.reference_start_obs
+        if reference is None:
+            reference = {
+                "main_images": obs["main_images"],
+                "wrist_images": obs.get("wrist_images"),
+            }
+        obs["reference_start_main_images"] = reference["main_images"].detach().clone()
+        wrist = reference.get("wrist_images")
+        if wrist is not None:
+            obs["reference_start_wrist_images"] = wrist.detach().clone()
+        return obs
+
     def _record_metrics(self, step_reward, infos):
         infos = super()._record_metrics(step_reward, infos)
         if not self.record_metrics or "episode" not in infos:
@@ -830,6 +872,11 @@ class ManiskillRLTEnv(ManiskillEnv):
         self._reset_rlt_switch(options.get("env_idx"))
         self._show_goal_site_visual()
         extracted_obs = self._wrap_obs(raw_obs, infos=infos)
+        self._update_reference_start_obs(
+            extracted_obs,
+            env_idx=options.get("env_idx"),
+        )
+        extracted_obs = self._attach_reference_start_obs(extracted_obs)
         return extracted_obs, infos
 
     def step(
@@ -851,6 +898,7 @@ class ManiskillRLTEnv(ManiskillEnv):
             fallback=terminations,
         )
         extracted_obs = self._wrap_obs(raw_obs, infos=infos)
+        extracted_obs = self._attach_reference_start_obs(extracted_obs)
         step_reward = self._calc_step_reward(_reward, infos)
 
         if self.record_metrics:

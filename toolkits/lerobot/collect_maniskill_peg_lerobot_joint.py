@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import importlib
+import json
 import logging
 import os
 import shutil
@@ -378,6 +379,47 @@ def _write_episode_video(
         raise _missing_dep_error("imageio", "imageio imageio-ffmpeg") from exc
 
 
+def _write_grm_goal_bank(
+    *,
+    output_dir: Path,
+    terminal_record: FrameRecord,
+    task: str,
+    seed: int,
+    solver_module: str,
+    main_camera: str,
+    wrist_camera: str,
+    target_control_mode: str,
+) -> Path:
+    task_dir = output_dir / "task_000"
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    main_image = _camera_image(terminal_record.obs, main_camera)
+    wrist_image = _camera_image(terminal_record.obs, wrist_camera)
+    if main_image is None or wrist_image is None:
+        raise ValueError(
+            "Successful terminal observation is missing the configured GRM cameras"
+        )
+
+    from PIL import Image
+
+    Image.fromarray(main_image).save(task_dir / "goal_main.png")
+    Image.fromarray(wrist_image).save(task_dir / "goal_wrist.png")
+    metadata = {
+        "task_id": 0,
+        "task_description": task,
+        "source_demo": f"official_motionplanning_seed_{seed}",
+        "environment_id": CAMERA_ENV_ID,
+        "solver": solver_module,
+        "seed": seed,
+        "control_mode": target_control_mode,
+        "cameras": {"main": main_camera, "wrist": wrist_camera},
+        "views": {"main": "goal_main.png", "wrist": "goal_wrist.png"},
+    }
+    with open(task_dir / "meta.json", "w", encoding="utf-8") as file:
+        json.dump(metadata, file, ensure_ascii=False, indent=2)
+    return task_dir
+
+
 def _resolve_output_path(repo_id: str) -> Path:
     try:
         from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME
@@ -660,6 +702,14 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Video output directory. Defaults to <dataset_path>_videos.",
     )
+    parser.add_argument(
+        "--grm-goal-bank-dir",
+        default="",
+        help=(
+            "Optional Robo-Dopamine goal bank directory. The first successful "
+            "expert replay terminal observation is saved as task_000."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -701,6 +751,7 @@ def main() -> None:
     attempts = 0
     solver_failures = 0
     replay_failures = 0
+    goal_bank_written = False
     pbar = tqdm(total=args.num_episodes, desc="Successful episodes")
 
     try:
@@ -757,6 +808,19 @@ def main() -> None:
                 continue
 
             replay_records, replay_actions = replay
+            if args.grm_goal_bank_dir and not goal_bank_written:
+                goal_dir = _write_grm_goal_bank(
+                    output_dir=Path(args.grm_goal_bank_dir).expanduser(),
+                    terminal_record=replay_records[-1],
+                    task=args.task,
+                    seed=episode_seed,
+                    solver_module=solver_module,
+                    main_camera=main_camera,
+                    wrist_camera=wrist_camera,
+                    target_control_mode=args.target_control_mode,
+                )
+                LOG.info("Saved Robo-Dopamine goal bank to %s", goal_dir)
+                goal_bank_written = True
             frames = _build_frames(
                 records=replay_records,
                 actions=replay_actions,

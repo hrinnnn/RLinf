@@ -55,6 +55,17 @@ from rlinf.utils.utils import (
 from rlinf.workers.env.history_manager import HistoryManager
 
 
+def _build_reward_done_payload(dones: torch.Tensor | None) -> dict[str, torch.Tensor]:
+    if dones is None:
+        return {}
+    if getattr(dones, "ndim", 0) > 1:
+        return {
+            "chunk_dones": dones,
+            "dones": dones.reshape(dones.shape[0], -1).any(dim=1),
+        }
+    return {"dones": dones.reshape(-1)}
+
+
 class EnvWorker(Worker):
     def __init__(self, cfg: DictConfig):
         Worker.__init__(self)
@@ -767,10 +778,9 @@ class EnvWorker(Worker):
                 env_output.env_infos
             )
 
-        dones = env_output.dones
-        if dones is not None and getattr(dones, "ndim", 0) > 1:
-            dones = dones[:, -1]
-            reward_input.update({"dones": dones})
+        reward_done_payload = _build_reward_done_payload(env_output.dones)
+        reward_input.update(reward_done_payload)
+        dones = reward_done_payload.get("dones")
 
         if self.reward_mode == "history_buffer":
             if stage_id is None:
