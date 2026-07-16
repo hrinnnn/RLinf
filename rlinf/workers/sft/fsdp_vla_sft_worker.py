@@ -89,7 +89,7 @@ class FSDPVlaSftWorker(FSDPSftWorker):
                     expert_sampling_ratio=float(
                         self.awbc_cfg.get("expert_sampling_ratio", 0.5)
                     ),
-                    seed=int(self.cfg.actor.get("seed", 0)),
+                    seed=int(self.cfg.actor.get("seed", 0)) + self._rank,
                     dataset_override=combined_dataset,
                     valid_only=bool(self.awbc_cfg.get("sample_valid_only", True)),
                 )
