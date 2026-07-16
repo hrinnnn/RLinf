@@ -15,10 +15,13 @@ import os
 from typing import Any
 
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
+from torch.utils.data import ConcatDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+from rlinf.algorithms.awbc import compute_arm_awbc_weights
 from rlinf.config import SupportedModel
+from rlinf.data.awbc import attach_awbc_to_openpi_dataloader
 from rlinf.data.lerobot_paths import resolve_lerobot_repo_id
 from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.utils.utils import get_rng_state, set_rng_state
@@ -27,12 +30,19 @@ from rlinf.workers.sft.fsdp_sft_worker import FSDPSftWorker
 
 class FSDPVlaSftWorker(FSDPSftWorker):
     def __init__(self, cfg: DictConfig):
+        self.awbc_cfg = cfg.get("awbc", {})
         super().__init__(cfg)
 
     def build_dataloader(self, data_paths: Any, eval_dataset: bool = False):
         if SupportedModel(self.cfg.actor.model.model_type) in [SupportedModel.OPENPI]:
-            repo_id = resolve_lerobot_repo_id(data_paths)
-            if repo_id is None:
+            awbc_enabled = bool(self.awbc_cfg.get("enabled", False))
+            path_entries = (
+                list(data_paths)
+                if awbc_enabled and isinstance(data_paths, (list, tuple, ListConfig))
+                else [data_paths]
+            )
+            repo_ids = [resolve_lerobot_repo_id(entry) for entry in path_entries]
+            if not repo_ids or any(repo_id is None for repo_id in repo_ids):
                 raise ValueError(
                     "OpenPI SFT requires data.train_data_paths to be set to a local "
                     "dataset path or LeRobot repo id."
@@ -42,16 +52,47 @@ class FSDPVlaSftWorker(FSDPSftWorker):
 
             from rlinf.models.embodiment.openpi.dataconfig import get_openpi_config
 
-            config = get_openpi_config(
-                self.cfg.actor.model.openpi.config_name,
-                model_path=self.cfg.actor.model.model_path,
-                batch_size=self.cfg.actor.micro_batch_size * self._world_size,
-                repo_id=repo_id,
-                data_kwargs=getattr(self.cfg.actor.model, "openpi_data", None),
-            )
-            data_loader = openpi_data_loader.create_data_loader(
-                config, framework="pytorch", shuffle=True
-            )
+            data_loaders = []
+            for repo_id in repo_ids:
+                config = get_openpi_config(
+                    self.cfg.actor.model.openpi.config_name,
+                    model_path=self.cfg.actor.model.model_path,
+                    batch_size=self.cfg.actor.micro_batch_size * self._world_size,
+                    repo_id=repo_id,
+                    data_kwargs=getattr(self.cfg.actor.model, "openpi_data", None),
+                )
+                data_loaders.append(
+                    openpi_data_loader.create_data_loader(
+                        config, framework="pytorch", shuffle=True
+                    )
+                )
+            data_loader = data_loaders[0]
+            if not eval_dataset and awbc_enabled:
+                manifest_path = self.awbc_cfg.get("progress_manifest")
+                if not manifest_path:
+                    raise ValueError(
+                        "awbc.progress_manifest is required when AWBC is enabled"
+                    )
+                combined_dataset = (
+                    ConcatDataset(
+                        [
+                            self._openpi_pytorch_dataloader(loader).dataset
+                            for loader in data_loaders
+                        ]
+                    )
+                    if len(data_loaders) > 1
+                    else None
+                )
+                data_loader = attach_awbc_to_openpi_dataloader(
+                    data_loader,
+                    manifest_path=str(manifest_path),
+                    expert_sampling_ratio=float(
+                        self.awbc_cfg.get("expert_sampling_ratio", 0.5)
+                    ),
+                    seed=int(self.cfg.actor.get("seed", 0)),
+                    dataset_override=combined_dataset,
+                    valid_only=bool(self.awbc_cfg.get("sample_valid_only", True)),
+                )
             return data_loader, data_loader.data_config()
         elif SupportedModel(self.cfg.actor.model.model_type) in [
             SupportedModel.LINGBOTVLA
@@ -83,6 +124,89 @@ class FSDPVlaSftWorker(FSDPSftWorker):
         raise NotImplementedError("eval is not supported for embodied sft right now.")
 
     def get_train_model_output(self, batch: Any) -> tuple[torch.Tensor, dict[str, Any]]:
+        awbc_metrics: dict[str, Any] = {}
+        if bool(self.awbc_cfg.get("enabled", False)):
+            if not isinstance(batch, dict):
+                raise TypeError("AWBC requires an OpenPI dictionary batch")
+            required = (
+                "awbc_delta_phi",
+                "awbc_episode_length",
+                "awbc_valid",
+                "awbc_confidence",
+                "awbc_source",
+            )
+            missing = [key for key in required if key not in batch]
+            if missing:
+                raise KeyError(f"AWBC batch is missing metadata: {missing}")
+
+            mode = str(self.awbc_cfg.get("mode", "arm_paper_exact"))
+            if mode not in {
+                "uniform",
+                "arm_paper_exact",
+                "robodopamine_robust",
+            }:
+                raise ValueError(f"Unsupported AWBC mode: {mode}")
+            robust = mode == "robodopamine_robust"
+            gain_clip_value = self.awbc_cfg.get("gain_clip") if robust else None
+            gain_clip = (
+                tuple(float(value) for value in gain_clip_value)
+                if gain_clip_value is not None
+                else None
+            )
+            stats_device = torch.device("cuda", self.device)
+            delta_phi = torch.as_tensor(
+                batch["awbc_delta_phi"], device=stats_device
+            )
+            valid = torch.as_tensor(batch["awbc_valid"], device=stats_device)
+            if mode == "uniform":
+                delta_phi = torch.zeros_like(delta_phi)
+                valid = torch.ones_like(valid, dtype=torch.bool)
+            result = compute_arm_awbc_weights(
+                delta_phi,
+                torch.as_tensor(batch["awbc_episode_length"], device=stats_device),
+                valid=valid,
+                confidence=torch.as_tensor(
+                    batch["awbc_confidence"], device=stats_device
+                ),
+                sigma_multiplier=float(self.awbc_cfg.get("sigma_multiplier", 2.0)),
+                negative_delta_policy=(
+                    str(self.awbc_cfg.get("negative_delta_policy", "continuous"))
+                    if robust
+                    else "continuous"
+                ),
+                confidence_power=(
+                    float(self.awbc_cfg.get("confidence_power", 0.0))
+                    if robust
+                    else 0.0
+                ),
+                weight_floor=(
+                    float(self.awbc_cfg.get("weight_floor", 0.0)) if robust else 0.0
+                ),
+                gain_clip=gain_clip,
+                distributed=self._world_size > 1,
+            )
+            batch["awbc_weight"] = result.weights
+
+            weights = result.weights.detach()
+            sources = torch.as_tensor(batch["awbc_source"], device=weights.device).bool()
+            expert_weights = weights[sources]
+            policy_weights = weights[~sources]
+            awbc_metrics = {
+                "awbc_weight_mean": weights.mean().item(),
+                "awbc_weight_min": weights.min().item(),
+                "awbc_weight_max": weights.max().item(),
+                "awbc_zero_weight_rate": (weights <= 0).float().mean().item(),
+                "awbc_effective_sample_size": result.effective_sample_size.item(),
+                "awbc_gain_mean": result.gain_mean.item(),
+                "awbc_gain_std": result.gain_std.item(),
+                "awbc_valid_count": result.valid_count,
+                "awbc_fallback": int(result.used_fallback),
+            }
+            if expert_weights.numel() > 0:
+                awbc_metrics["awbc_expert_weight_mean"] = expert_weights.mean().item()
+            if policy_weights.numel() > 0:
+                awbc_metrics["awbc_policy_weight_mean"] = policy_weights.mean().item()
+
         with self.amp_context:
             output = self.model(forward_type=ForwardType.SFT, data=batch)
 
@@ -91,7 +215,7 @@ class FSDPVlaSftWorker(FSDPSftWorker):
         else:
             loss = output["loss"]
 
-        step_metrics = {"loss": loss.detach().item()}
+        step_metrics = {"loss": loss.detach().item(), **awbc_metrics}
         if isinstance(output, dict):
             for key, value in output.items():
                 if key == "loss":

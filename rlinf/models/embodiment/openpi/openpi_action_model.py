@@ -28,6 +28,7 @@ from openpi.models.pi0_config import Pi0Config
 from openpi.models_pytorch.pi0_pytorch import PI0Pytorch, make_att_2d_masks
 from torch.utils._pytree import tree_map
 
+from rlinf.algorithms.awbc import weighted_flow_matching_loss
 from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
 from rlinf.models.embodiment.modules.explore_noise_net import ExploreNoiseNet
 from rlinf.models.embodiment.modules.value_head import ValueHead
@@ -371,9 +372,11 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
 
         if isinstance(data, tuple):
             observation, actions = data
+            awbc_weight = None
         else:
             observation = data["observation"]
             actions = data["actions"]
+            awbc_weight = data.get("awbc_weight")
 
         device = next(self.parameters()).device
         register_pytree_dataclasses(observation)
@@ -400,8 +403,16 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             loss = super().forward(observation, actions)
         if use_action_chunk_loss:
             loss = loss[:, : self.config.action_chunk, : self.config.action_env_dim]
-        vla_loss = loss.mean()
+        vla_loss, per_sample_vla_loss = weighted_flow_matching_loss(
+            loss, awbc_weight
+        )
         if not self.config.use_rlt:
+            if awbc_weight is not None:
+                return {
+                    "loss": vla_loss,
+                    "vla_loss": vla_loss,
+                    "awbc_unweighted_vla_loss": per_sample_vla_loss.mean(),
+                }
             return vla_loss
 
         rlt_param = next(self.rlt_module.parameters())
@@ -413,6 +424,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             "loss": total_loss,
             "vla_loss": vla_loss,
             "rlt_loss": rlt_loss,
+            "awbc_unweighted_vla_loss": per_sample_vla_loss.mean(),
         }
 
     def _sft_forward_with_rlt_prefix(self, observation, actions):

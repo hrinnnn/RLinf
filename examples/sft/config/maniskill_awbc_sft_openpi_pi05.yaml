@@ -1,0 +1,109 @@
+defaults:
+  - model/pi0_5@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: all
+
+runner:
+  task_type: sft
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "maniskill_pi05_awbc"
+    logger_backends: ["tensorboard"]
+  max_epochs: -1
+  max_steps: 500
+  val_check_interval: -1
+  save_interval: 100
+
+data:
+  train_data_paths:
+    - dataset_path: "/path/to/expert_dataset"
+      weight: 1.0
+    - dataset_path: "/path/to/policy_dataset"
+      weight: 1.0
+
+awbc:
+  enabled: true
+  mode: "arm_paper_exact"
+  progress_manifest: "/path/to/combined_awbc_progress.jsonl"
+  sigma_multiplier: 2.0
+  invalid_policy: "zero_weight"
+  expert_sampling_ratio: 0.5
+  sample_valid_only: true
+  negative_delta_policy: "continuous"
+  confidence_power: 0.0
+  weight_floor: 0.0
+  phi_smoothing: "none"
+  gain_clip: null
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 4
+  global_batch_size: 64
+  seed: 0
+
+  model:
+    precision: null
+    model_path: "/path/to/pi05_warm_start"
+    model_type: "openpi"
+    num_action_chunks: 10
+    action_dim: 8
+    add_value_head: false
+    num_steps: 5
+    openpi:
+      config_name: "pi05_rlt_maniskill_joint"
+      num_images_in_input: 2
+      train_expert_only: true
+      detach_critic_input: true
+      action_horizon: 10
+      action_chunk: ${actor.model.num_action_chunks}
+      action_env_dim: ${actor.model.action_dim}
+      num_steps: ${actor.model.num_steps}
+      use_rlt: false
+
+    openpi_data:
+      repo_id: "maniskill_peginsertionside_awbc"
+      default_prompt: "insert the peg in the hole"
+      norm_stats_path: null
+
+  optim:
+    lr: 2.5e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 1.0e-10
+    clip_grad: 1.0
+    total_training_steps: 500
+    lr_warmup_steps: 50
+    lr_scheduler: "cosine"
+    num_cycles: 0.5
+    min_lr: 2.5e-6
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: false
+    gradient_checkpointing: false
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: false
+
+critic:
+  use_critic_model: false
