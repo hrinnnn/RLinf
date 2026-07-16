@@ -1,0 +1,121 @@
+defaults:
+  - env/maniskill_rlt@env.train
+  - env/maniskill_rlt@env.eval
+  - model/pi0_5@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: all
+
+runner:
+  task_type: embodied
+  only_eval: true
+  max_epochs: 1
+  max_steps: -1
+  val_check_interval: 1
+  save_interval: -1
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "maniskill_pi05_awbc_policy_collection"
+    logger_backends: ["tensorboard"]
+
+algorithm:
+  group_size: 1
+  reward_type: chunk_level
+  logprob_type: chunk_level
+  entropy_type: chunk_level
+  adv_type: gae
+  loss_type: actor_critic
+  loss_agg_func: "token-mean"
+  gamma: 0.99
+  gae_lambda: 0.95
+
+env:
+  group_name: "EnvGroup"
+  train:
+    total_num_envs: 1
+  eval:
+    total_num_envs: 8
+    rollout_epoch: 4
+    seed: 2026
+    auto_reset: false
+    ignore_terminations: false
+    use_fixed_reset_state_ids: true
+    max_episode_steps: 500
+    max_steps_per_rollout_epoch: 500
+    rlt_policy_switch:
+      enable: false
+    video_cfg:
+      save_video: false
+    data_collection:
+      enabled: true
+      save_dir: ${runner.logger.log_path}/policy_rollouts_raw
+      export_format: "lerobot"
+      only_success: false
+      robot_type: "panda"
+      fps: 10
+      finalize_interval: 8
+      resume: false
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: false
+  enable_offload: false
+  pipeline_stage_num: 1
+  model:
+    model_type: "openpi"
+    model_path: ${oc.env:PI05_MODEL_PATH,/path/to/pi05_warm_start}
+    precision: null
+    num_action_chunks: 10
+    action_dim: 8
+    add_value_head: false
+    num_steps: 5
+    openpi:
+      config_name: "pi05_rlt_maniskill_joint"
+      num_images_in_input: 2
+      train_expert_only: true
+      action_horizon: 10
+      action_chunk: 10
+      action_env_dim: 8
+      num_steps: 5
+      use_rlt: false
+    openpi_data:
+      repo_id: "maniskill_peginsertionside_joint"
+      default_prompt: "insert the peg in the hole"
+      norm_stats_path: ${oc.env:NORM_STATS_PATH,null}
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 4
+  global_batch_size: 8
+  seed: 0
+  enable_offload: false
+  model: ${rollout.model}
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    gradient_checkpointing: false
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: false
+
+critic:
+  use_critic_model: false
