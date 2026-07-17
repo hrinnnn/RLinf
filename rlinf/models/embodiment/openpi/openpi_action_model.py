@@ -1014,6 +1014,121 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         return scores / float(num_timesteps * num_noise_samples)
 
     @torch.no_grad()
+    def compute_vfd_uncertainty(
+        self,
+        env_obs: dict[str, Any],
+        comparison_model: "OpenPi0ForRLActionPrediction",
+        *,
+        num_action_samples: int = 5,
+        velocity_eval_times: Sequence[float] = (
+            0.0,
+            0.1,
+            0.2,
+            0.3,
+            0.4,
+            0.5,
+            0.6,
+            0.7,
+            0.8,
+            0.9,
+            0.95,
+        ),
+        generator: torch.Generator | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample actions and compute uq_vla one-way VFD against another model.
+
+        The reference model (``self``) generates a flow ODE trajectory from a
+        shared Gaussian prior.  The comparison model evaluates its velocity on
+        those same intermediate states, matching ``CrossBayesianSampler`` with
+        the ``vfd_oneway`` scoring metric in learnsyslab/uq_vla.
+
+        Returns:
+            Candidate actions with shape ``[B, C, H, A]`` and per-observation
+            VFD scores with shape ``[B]``.
+        """
+
+        if num_action_samples < 1:
+            raise ValueError("num_action_samples must be positive.")
+        for field_name in ("action_horizon", "action_dim", "num_steps"):
+            reference_value = getattr(self.config, field_name)
+            comparison_value = getattr(comparison_model.config, field_name)
+            if reference_value != comparison_value:
+                raise ValueError(
+                    f"VFD model {field_name} mismatch: {reference_value} vs "
+                    f"{comparison_value}."
+                )
+        if next(self.parameters()).device != next(comparison_model.parameters()).device:
+            raise ValueError("VFD ensemble members must be on the same device.")
+
+        from rlinf.algorithms.vfd import (
+            VfdOneway,
+            euler_integrate,
+            make_sampling_time_grid,
+            process_velocity_eval_times,
+        )
+        from rlinf.models.embodiment.openpi.openpi_vfd_adapter import (
+            OpenPi05VFDAdapter,
+        )
+
+        eval_times = process_velocity_eval_times(velocity_eval_times)
+        reference_adapter = OpenPi05VFDAdapter(self)
+        comparison_adapter = OpenPi05VFDAdapter(comparison_model)
+        reference_conditioning = reference_adapter.prepare_conditioning(
+            env_obs,
+            num_action_samples,
+        )
+        comparison_conditioning = comparison_adapter.prepare_conditioning(
+            env_obs,
+            num_action_samples,
+        )
+        reference_velocity_fn = reference_adapter.make_velocity_fn(
+            reference_conditioning
+        )
+        comparison_velocity_fn = comparison_adapter.make_velocity_fn(
+            comparison_conditioning
+        )
+
+        expanded_batch_size = reference_conditioning["state"].shape[0]
+        if expanded_batch_size % num_action_samples != 0:
+            raise RuntimeError(
+                "Expanded VFD batch is not divisible by num_action_samples."
+            )
+        batch_size = expanded_batch_size // num_action_samples
+        noise_sample = reference_adapter.sample_prior(
+            expanded_batch_size,
+            generator=generator,
+        )
+        sampling_time_grid = make_sampling_time_grid(
+            step_size=reference_adapter.ode_solver_config["step_size"],
+            extra_times=eval_times,
+            device=reference_adapter.device,
+            dtype=reference_adapter.dtype,
+        )
+        ode_states, _ = euler_integrate(
+            x_0=noise_sample,
+            velocity_fn=reference_velocity_fn,
+            time_grid=sampling_time_grid,
+        )
+        metric = VfdOneway(eval_times, sampling_time_grid)
+        per_sample_scores = metric(
+            ref_ode_states=ode_states,
+            ref_velocity_fn=reference_velocity_fn,
+            cmp_ode_states=ode_states,
+            cmp_velocity_fn=comparison_velocity_fn,
+        )
+        scores = per_sample_scores.reshape(
+            batch_size,
+            num_action_samples,
+        ).mean(dim=1)
+        action_candidates = ode_states[-1].reshape(
+            batch_size,
+            num_action_samples,
+            self.config.action_horizon,
+            self.config.action_dim,
+        )
+        return action_candidates, scores
+
+    @torch.no_grad()
     def sample_actions(
         self,
         observation: _model.Observation,
