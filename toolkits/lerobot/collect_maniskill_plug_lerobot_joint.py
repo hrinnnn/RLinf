@@ -16,6 +16,7 @@ import json
 import logging
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,33 @@ def build_episode_manifest_row(*, episode_index: int, seed: int, metadata: dict[
         "source": "expert",
         **metadata,
     }
+
+
+def write_episode_video_durably(
+    frames: list[dict[str, Any]],
+    *,
+    video_dir: Path,
+    episode_index: int,
+    seed: int,
+    fps: int,
+) -> Path:
+    """Finish MP4 encoding locally before copying the complete file to OSSFS."""
+    filename = f"episode_{episode_index:06d}_seed_{seed:06d}.mp4"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    destination = video_dir / filename
+    with tempfile.TemporaryDirectory(prefix="rlinf-plug-video-") as temporary_dir:
+        _write_episode_video(
+            frames,
+            video_dir=Path(temporary_dir),
+            episode_index=episode_index,
+            seed=seed,
+            fps=fps,
+        )
+        encoded = Path(temporary_dir) / filename
+        if not encoded.is_file() or encoded.stat().st_size == 0:
+            raise RuntimeError(f"Local video encoding did not create {encoded}")
+        shutil.copy2(encoded, destination)
+    return destination
 
 
 def _build_env(args: argparse.Namespace, *, control_mode: str):
@@ -267,7 +295,13 @@ def main() -> None:
             all_frames.extend(episode_frames)
             all_chunks.extend(episode_chunks)
             if args.save_videos:
-                _write_episode_video(frames, video_dir=_video_output_dir(args.repo_id, ""), episode_index=saved, seed=seed, fps=args.control_freq)
+                write_episode_video_durably(
+                    frames,
+                    video_dir=_video_output_dir(args.repo_id, ""),
+                    episode_index=saved,
+                    seed=seed,
+                    fps=args.control_freq,
+                )
             saved += 1
     finally:
         if dataset is not None and getattr(dataset, "image_writer", None) is not None:
