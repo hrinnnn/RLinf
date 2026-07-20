@@ -48,9 +48,9 @@ def _load_motion_planning_symbols():
         "mani_skill.examples.motionplanning.panda.motionplanner"
     )
     utils_module = importlib.import_module(
-        "mani_skill.examples.motionplanning.panda.utils"
+        "mani_skill.examples.motionplanning.base_motionplanner.utils"
     )
-    sapien = importlib.import_module("sapien.core")
+    sapien = importlib.import_module("sapien")
     return (
         planner_module.PandaArmMotionPlanningSolver,
         utils_module.compute_grasp_info_by_obb,
