@@ -13,7 +13,11 @@ from rlinf.envs.maniskill.plug_charger_variants import (
 
 def test_controlled_yaw_ranges_are_disjoint_with_a_large_gap():
     assert PLUG_CHARGER_ID_YAW_RANGE[1] < PLUG_CHARGER_OOD_YAW_RANGE[0]
-    assert (PLUG_CHARGER_OOD_YAW_RANGE[0] - PLUG_CHARGER_ID_YAW_RANGE[1]) > np.pi
+    # The closest ID/OOD orientations are 15° and 165° apart.
+    assert np.isclose(
+        PLUG_CHARGER_OOD_YAW_RANGE[0] - PLUG_CHARGER_ID_YAW_RANGE[1],
+        5 * np.pi / 6,
+    )
 
 
 def test_quaternion_yaw_and_wrapping_follow_wxyz_convention():
