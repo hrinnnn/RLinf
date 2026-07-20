@@ -15,8 +15,13 @@ import importlib
 import json
 import logging
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
+
+RLINF_ROOT = Path(__file__).resolve().parents[2]
+if str(RLINF_ROOT) not in sys.path:
+    sys.path.insert(0, str(RLINF_ROOT))
 
 from rlinf.envs.maniskill.plug_charger_variants import (
     PLUG_CHARGER_ID_ENV_ID,
