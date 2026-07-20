@@ -49,3 +49,4 @@ def test_oracle_uses_cached_reach_pose_before_switching_to_grasp(monkeypatch):
     assert target is grasp_pose
     assert gripper == -1.0
     assert phase == "grasp"
+    assert oracle._phase == "grasp"

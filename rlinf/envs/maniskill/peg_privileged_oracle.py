@@ -77,7 +77,12 @@ class PegPrivilegedChunkOracle:
         self._grasp_pose: Any | None = None
         self._reach_pose: Any | None = None
         self._phase = "reach"
-        self._preinsert_chunks = 0
+
+    @staticmethod
+    def _at_pose(tcp_pose: Any, target_pose: Any, *, tolerance: float = 0.02) -> bool:
+        tcp = _first_vector(tcp_pose.p, 3)
+        target = _first_vector(target_pose.p, 3)
+        return float(np.linalg.norm(tcp - target)) < tolerance
 
     def _initialize_reference_poses(self, base_env: Any) -> None:
         if self._grasp_pose is not None:
@@ -116,27 +121,27 @@ class PegPrivilegedChunkOracle:
         assert self._grasp_pose is not None
         assert self._reach_pose is not None
         if self._phase == "reach":
-            tcp = _first_vector(base_env.agent.tcp.pose.p, 3)
-            reach = _first_vector(self._reach_pose.p, 3)
-            if float(np.linalg.norm(tcp - reach)) < 0.03:
+            if self._at_pose(base_env.agent.tcp.pose, self._reach_pose):
                 self._phase = "grasp"
             else:
                 return self._reach_pose, 1.0, "reach"
 
         if self._phase == "grasp":
-            # The reference solver closes for six control steps, then proceeds.
-            # A ten-step action chunk is therefore the natural atomic grasp.
-            self._phase = "preinsert"
+            # The reference solver closes for six control steps.  A chunk can
+            # be shorter than the remaining motion, so retain this waypoint
+            # until the actual TCP reaches it.
+            if self._at_pose(base_env.agent.tcp.pose, self._grasp_pose):
+                self._phase = "preinsert"
             return self._grasp_pose, -1.0, "grasp"
 
         insert_pose = base_env.goal_pose * self._peg_init_pose.inv() * self._grasp_pose
         if self._phase == "preinsert":
-            self._preinsert_chunks += 1
-            # ManiSkill's official reference performs three geometric
-            # pre-insertion refinements before its final insertion command.
-            if self._preinsert_chunks >= 3:
+            preinsert_pose = insert_pose * sapien.Pose(
+                [-0.01 - float(base_env.peg_half_sizes[0, 0]), 0, 0]
+            )
+            if self._at_pose(base_env.agent.tcp.pose, preinsert_pose):
                 self._phase = "insert"
-            return insert_pose * sapien.Pose([-0.01 - float(base_env.peg_half_sizes[0, 0]), 0, 0]), -1.0, "preinsert"
+            return preinsert_pose, -1.0, "preinsert"
         return insert_pose * sapien.Pose([0.05, 0, 0]), -1.0, "insert"
 
     def _plan_qpos_path(self, env: Any, target_pose: Any) -> np.ndarray | None:
