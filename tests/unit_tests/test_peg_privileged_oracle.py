@@ -4,6 +4,7 @@ import numpy as np
 
 from rlinf.envs.maniskill import peg_privileged_oracle
 from rlinf.envs.maniskill.peg_privileged_oracle import (
+    PegOraclePlan,
     PegPrivilegedChunkOracle,
     _normalize_delta,
 )
@@ -50,3 +51,19 @@ def test_oracle_uses_cached_reach_pose_before_switching_to_grasp(monkeypatch):
     assert gripper == -1.0
     assert phase == "grasp"
     assert oracle._phase == "grasp"
+
+
+def test_oracle_converts_joint_target_against_live_qpos():
+    plan = PegOraclePlan(
+        actions=np.zeros((1, 8), dtype=np.float32),
+        phase="reach",
+        planning_succeeded=True,
+        joint_targets=np.full((1, 7), 0.05, dtype=np.float32),
+        gripper=-1.0,
+    )
+    qpos = np.concatenate([np.full(7, 0.03, dtype=np.float32), [0.04, 0.04]])
+
+    action = plan.action_at(qpos, 0)
+
+    assert np.allclose(action[:7], 0.2)
+    assert action[-1] == -1.0

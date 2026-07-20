@@ -24,6 +24,25 @@ class PegOraclePlan:
     actions: np.ndarray
     phase: str
     planning_succeeded: bool
+    joint_targets: np.ndarray | None = None
+    gripper: float = 1.0
+
+    def action_at(self, qpos: Any, step_index: int) -> np.ndarray:
+        """Convert a planner target with the *live* robot qpos.
+
+        ManiSkill's joint-delta controller treats every action as a delta from
+        the current physical qpos.  The reference collector performs this
+        conversion immediately before every low-level step; doing it against
+        a predicted qpos lets tracking error accumulate across a chunk.
+        """
+        if self.joint_targets is None:
+            return self.actions[min(step_index, len(self.actions) - 1)]
+        current = _as_numpy(qpos).reshape(-1, 9)[0].astype(np.float32)
+        target = self.joint_targets[min(step_index, len(self.joint_targets) - 1)]
+        lower = np.full(7, _DEFAULT_ARM_DELTA_LOWER, dtype=np.float32)
+        upper = np.full(7, _DEFAULT_ARM_DELTA_UPPER, dtype=np.float32)
+        arm = _normalize_delta(target[:7] - current[:7], lower, upper)
+        return np.concatenate([arm.astype(np.float32), [self.gripper]])
 
 
 def _as_bool(value: Any) -> bool:
@@ -183,19 +202,21 @@ class PegPrivilegedChunkOracle:
             raise ValueError("Peg privileged oracle requires pd_joint_delta_pos")
         target_pose, gripper, phase = self._target(base_env)
         path = self._plan_qpos_path(env, target_pose)
-        current_qpos = _as_numpy(base_env.agent.robot.get_qpos()).reshape(-1, 9)[0].astype(np.float32)
         if path is None or len(path) == 0:
             hold = np.zeros((self.chunk_size, 8), dtype=np.float32)
             hold[:, -1] = gripper
             return PegOraclePlan(hold, phase, False)
 
-        lower = np.full(7, _DEFAULT_ARM_DELTA_LOWER, dtype=np.float32)
-        upper = np.full(7, _DEFAULT_ARM_DELTA_UPPER, dtype=np.float32)
-        actions: list[np.ndarray] = []
-        predicted_qpos = current_qpos.copy()
-        for step in range(self.chunk_size):
-            target_qpos = path[min(step, len(path) - 1), :7]
-            arm = _normalize_delta(target_qpos - predicted_qpos[:7], lower, upper)
-            actions.append(np.concatenate([arm.astype(np.float32), [gripper]]))
-            predicted_qpos[:7] = target_qpos
-        return PegOraclePlan(np.stack(actions), phase, True)
+        joint_targets = np.asarray(
+            [path[min(step, len(path) - 1), :7] for step in range(self.chunk_size)],
+            dtype=np.float32,
+        )
+        actions = np.zeros((self.chunk_size, 8), dtype=np.float32)
+        actions[:, -1] = gripper
+        return PegOraclePlan(
+            actions,
+            phase,
+            True,
+            joint_targets=joint_targets,
+            gripper=gripper,
+        )
