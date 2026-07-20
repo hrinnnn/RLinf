@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from rlinf.toolkits.lerobot.collect_maniskill_plug_lerobot_joint import (
+from toolkits.lerobot.collect_maniskill_plug_lerobot_joint import (
     build_episode_manifest_row,
     controlled_env_id,
 )

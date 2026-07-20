@@ -25,7 +25,7 @@ from rlinf.envs.maniskill.plug_charger_variants import (
     register_controlled_plug_charger_variants,
     reset_metadata,
 )
-from rlinf.toolkits.lerobot.collect_maniskill_peg_lerobot_joint import (
+from toolkits.lerobot.collect_maniskill_peg_lerobot_joint import (
     MAIN_CAMERA_CANDIDATES,
     WRIST_CAMERA_CANDIDATES,
     _bool_scalar,
