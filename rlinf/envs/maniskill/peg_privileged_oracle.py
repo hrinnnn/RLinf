@@ -76,6 +76,8 @@ class PegPrivilegedChunkOracle:
         self._peg_init_pose: Any | None = None
         self._grasp_pose: Any | None = None
         self._reach_pose: Any | None = None
+        self._phase = "reach"
+        self._preinsert_chunks = 0
 
     def _initialize_reference_poses(self, base_env: Any) -> None:
         if self._grasp_pose is not None:
@@ -113,19 +115,29 @@ class PegPrivilegedChunkOracle:
         assert self._peg_init_pose is not None
         assert self._grasp_pose is not None
         assert self._reach_pose is not None
-        grasped = _as_bool(base_env.agent.is_grasping(base_env.peg, max_angle=20))
-        partial = _as_bool(getattr(base_env, "_online_partial_insert", False))
-        if not grasped:
+        if self._phase == "reach":
             tcp = _first_vector(base_env.agent.tcp.pose.p, 3)
             reach = _first_vector(self._reach_pose.p, 3)
             if float(np.linalg.norm(tcp - reach)) < 0.03:
-                return self._grasp_pose, -1.0, "grasp"
-            return self._reach_pose, 1.0, "reach"
+                self._phase = "grasp"
+            else:
+                return self._reach_pose, 1.0, "reach"
+
+        if self._phase == "grasp":
+            # The reference solver closes for six control steps, then proceeds.
+            # A ten-step action chunk is therefore the natural atomic grasp.
+            self._phase = "preinsert"
+            return self._grasp_pose, -1.0, "grasp"
 
         insert_pose = base_env.goal_pose * self._peg_init_pose.inv() * self._grasp_pose
-        if partial:
-            return insert_pose * sapien.Pose([0.05, 0, 0]), -1.0, "insert"
-        return insert_pose * sapien.Pose([-0.05, 0, 0]), -1.0, "preinsert"
+        if self._phase == "preinsert":
+            self._preinsert_chunks += 1
+            # ManiSkill's official reference performs three geometric
+            # pre-insertion refinements before its final insertion command.
+            if self._preinsert_chunks >= 3:
+                self._phase = "insert"
+            return insert_pose * sapien.Pose([-0.01 - float(base_env.peg_half_sizes[0, 0]), 0, 0]), -1.0, "preinsert"
+        return insert_pose * sapien.Pose([0.05, 0, 0]), -1.0, "insert"
 
     def _plan_qpos_path(self, env: Any, target_pose: Any) -> np.ndarray | None:
         solver_cls, _grasp, _obb, _sapien = _load_motion_planning_symbols()
