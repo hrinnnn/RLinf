@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from rlinf.envs.maniskill.peg_privileged_oracle import _normalize_delta
+from rlinf.envs.maniskill import peg_privileged_oracle
+from rlinf.envs.maniskill.peg_privileged_oracle import (
+    PegPrivilegedChunkOracle,
+    _normalize_delta,
+)
 
 
 def test_joint_delta_normalization_maps_controller_bounds_to_unit_interval():
@@ -12,3 +16,36 @@ def test_joint_delta_normalization_maps_controller_bounds_to_unit_interval():
         np.full(3, 0.1, dtype=np.float32),
     )
     assert np.allclose(values, [-1.0, 0.0, 1.0])
+
+
+def test_oracle_uses_cached_reach_pose_before_switching_to_grasp(monkeypatch):
+    class Pose:
+        def __init__(self, point):
+            self.p = np.asarray([point], dtype=np.float32)
+
+    class Agent:
+        tcp = type("Tcp", (), {"pose": Pose([0.01, 0.0, 0.0])})()
+
+        @staticmethod
+        def is_grasping(*_args, **_kwargs):
+            return False
+
+    env = type("Env", (), {"agent": Agent()})()
+    oracle = PegPrivilegedChunkOracle(chunk_size=10)
+    reach_pose = Pose([0.0, 0.0, 0.0])
+    grasp_pose = Pose([0.0, 0.0, 0.05])
+    oracle._reach_pose = reach_pose
+    oracle._grasp_pose = grasp_pose
+    oracle._peg_init_pose = object()
+    monkeypatch.setattr(oracle, "_initialize_reference_poses", lambda _env: None)
+    monkeypatch.setattr(
+        peg_privileged_oracle,
+        "_load_motion_planning_symbols",
+        lambda: (None, None, None, None),
+    )
+
+    target, gripper, phase = oracle._target(env)
+
+    assert target is grasp_pose
+    assert gripper == -1.0
+    assert phase == "grasp"

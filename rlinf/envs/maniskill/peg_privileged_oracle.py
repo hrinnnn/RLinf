@@ -71,44 +71,58 @@ class PegPrivilegedChunkOracle:
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
         self.chunk_size = int(chunk_size)
+        # Match ManiSkill's reference solution: grasp geometry is established
+        # once at reset, then every one-chunk re-plan targets that same pose.
+        self._peg_init_pose: Any | None = None
+        self._grasp_pose: Any | None = None
+        self._reach_pose: Any | None = None
 
-    def _target(self, base_env: Any) -> tuple[Any, float, str]:
+    def _initialize_reference_poses(self, base_env: Any) -> None:
+        if self._grasp_pose is not None:
+            return
         (
             _solver_cls,
             compute_grasp_info_by_obb,
             get_actor_obb,
             sapien,
         ) = _load_motion_planning_symbols()
+        obb = get_actor_obb(base_env.peg)
+        approaching = np.array([0.0, 0.0, -1.0])
+        target_closing = _as_numpy(
+            base_env.agent.tcp.pose.to_transformation_matrix()[0, :3, 1]
+        )
+        grasp_info = compute_grasp_info_by_obb(
+            obb,
+            approaching=approaching,
+            target_closing=target_closing,
+            depth=0.025,
+        )
+        grasp_pose = base_env.agent.build_grasp_pose(
+            approaching, grasp_info["closing"], grasp_info["center"]
+        )
+        offset = sapien.Pose(
+            [-max(0.05, float(base_env.peg_half_sizes[0, 0]) / 2 + 0.01), 0, 0]
+        )
+        self._peg_init_pose = base_env.peg.pose
+        self._grasp_pose = grasp_pose * offset
+        self._reach_pose = self._grasp_pose * sapien.Pose([0, 0, -0.05])
+
+    def _target(self, base_env: Any) -> tuple[Any, float, str]:
+        _solver_cls, _grasp, _obb, sapien = _load_motion_planning_symbols()
+        self._initialize_reference_poses(base_env)
+        assert self._peg_init_pose is not None
+        assert self._grasp_pose is not None
+        assert self._reach_pose is not None
         grasped = _as_bool(base_env.agent.is_grasping(base_env.peg, max_angle=20))
         partial = _as_bool(getattr(base_env, "_online_partial_insert", False))
         if not grasped:
-            obb = get_actor_obb(base_env.peg)
-            approaching = np.array([0.0, 0.0, -1.0])
-            target_closing = _as_numpy(
-                base_env.agent.tcp.pose.to_transformation_matrix()[0, :3, 1]
-            )
-            grasp_info = compute_grasp_info_by_obb(
-                obb,
-                approaching=approaching,
-                target_closing=target_closing,
-                depth=0.025,
-            )
-            grasp_pose = base_env.agent.build_grasp_pose(
-                approaching, grasp_info["closing"], grasp_info["center"]
-            )
-            offset = sapien.Pose(
-                [-max(0.05, float(base_env.peg_half_sizes[0, 0]) / 2 + 0.01), 0, 0]
-            )
-            grasp_pose = grasp_pose * offset
             tcp = _first_vector(base_env.agent.tcp.pose.p, 3)
-            peg = _first_vector(base_env.peg.pose.p, 3)
-            near_grasp = float(np.linalg.norm(tcp - peg)) < 0.07
-            if near_grasp:
-                return grasp_pose, -1.0, "grasp"
-            return grasp_pose * sapien.Pose([0, 0, -0.05]), 1.0, "reach"
+            reach = _first_vector(self._reach_pose.p, 3)
+            if float(np.linalg.norm(tcp - reach)) < 0.03:
+                return self._grasp_pose, -1.0, "grasp"
+            return self._reach_pose, 1.0, "reach"
 
-        tcp_pose = base_env.agent.tcp.pose
-        insert_pose = base_env.goal_pose * base_env.peg.pose.inv() * tcp_pose
+        insert_pose = base_env.goal_pose * self._peg_init_pose.inv() * self._grasp_pose
         if partial:
             return insert_pose * sapien.Pose([0.05, 0, 0]), -1.0, "insert"
         return insert_pose * sapien.Pose([-0.05, 0, 0]), -1.0, "preinsert"
