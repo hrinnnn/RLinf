@@ -30,7 +30,7 @@ def test_oracle_uses_cached_reach_pose_before_switching_to_grasp(monkeypatch):
         def is_grasping(*_args, **_kwargs):
             return False
 
-    env = type("Env", (), {"agent": Agent()})()
+    env = type("Env", (), {"agent": Agent(), "peg": object()})()
     oracle = PegPrivilegedChunkOracle(chunk_size=10)
     reach_pose = Pose([0.0, 0.0, 0.0])
     grasp_pose = Pose([0.0, 0.0, 0.05])
