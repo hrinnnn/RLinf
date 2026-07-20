@@ -23,6 +23,7 @@ from rlinf.data.awbc import (
     AWBCProgressRecord,
     AWBCSidecarDataset,
     BalancedSourceBatchSampler,
+    UniformValidBatchSampler,
 )
 
 
@@ -155,6 +156,17 @@ def test_balanced_sampler_excludes_invalid_rows_by_default():
     )
 
     assert list(sampler) == [[2, 0]] or list(sampler) == [[0, 2]]
+
+
+def test_uniform_valid_sampler_preserves_natural_source_counts():
+    records = [
+        _record(0, source="expert", valid=True),
+        _record(1, source="expert", valid=True),
+        _record(2, source="policy", valid=True),
+        _record(3, source="policy", valid=False),
+    ]
+    sampler = UniformValidBatchSampler(AWBCProgressManifest(records), batch_size=2, seed=3)
+    assert sorted(index for batch in sampler for index in batch) == [0, 1, 2]
 
 
 def test_manifest_round_trip_jsonl(tmp_path):

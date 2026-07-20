@@ -86,8 +86,10 @@ class FSDPVlaSftWorker(FSDPSftWorker):
                 data_loader = attach_awbc_to_openpi_dataloader(
                     data_loader,
                     manifest_path=str(manifest_path),
-                    expert_sampling_ratio=float(
-                        self.awbc_cfg.get("expert_sampling_ratio", 0.5)
+                    expert_sampling_ratio=(
+                        None
+                        if self.awbc_cfg.get("expert_sampling_ratio", None) is None
+                        else float(self.awbc_cfg.expert_sampling_ratio)
                     ),
                     seed=int(self.cfg.actor.get("seed", 0)) + self._rank,
                     dataset_override=combined_dataset,

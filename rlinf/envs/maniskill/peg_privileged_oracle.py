@@ -1,0 +1,170 @@
+"""A one-chunk privileged-state PegInsertionSide oracle.
+
+This intentionally reuses ManiSkill's official Panda motion-planning solver,
+but never calls its top-level ``solve`` helper because that helper resets the
+environment.  The oracle plans from the simulator's current robot/object state
+and returns at most one policy action chunk in ``pd_joint_delta_pos`` format.
+"""
+
+from __future__ import annotations
+
+import importlib
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+
+
+_DEFAULT_ARM_DELTA_LOWER = -0.1
+_DEFAULT_ARM_DELTA_UPPER = 0.1
+
+
+@dataclass(frozen=True)
+class PegOraclePlan:
+    actions: np.ndarray
+    phase: str
+    planning_succeeded: bool
+
+
+def _as_bool(value: Any) -> bool:
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()
+    return bool(np.asarray(value, dtype=bool).reshape(-1).any())
+
+
+def _as_numpy(value: Any) -> np.ndarray:
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _first_vector(value: Any, width: int) -> np.ndarray:
+    array = _as_numpy(value).astype(np.float32)
+    return array.reshape(-1, width)[0]
+
+
+def _load_motion_planning_symbols():
+    planner_module = importlib.import_module(
+        "mani_skill.examples.motionplanning.panda.motionplanner"
+    )
+    utils_module = importlib.import_module(
+        "mani_skill.examples.motionplanning.panda.utils"
+    )
+    sapien = importlib.import_module("sapien.core")
+    return (
+        planner_module.PandaArmMotionPlanningSolver,
+        utils_module.compute_grasp_info_by_obb,
+        utils_module.get_actor_obb,
+        sapien,
+    )
+
+
+def _normalize_delta(delta: np.ndarray, lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
+    clipped = np.clip(delta, lower, upper)
+    return np.clip(2.0 * (clipped - lower) / (upper - lower) - 1.0, -1.0, 1.0)
+
+
+class PegPrivilegedChunkOracle:
+    """Plan one non-resetting privileged action chunk for a single ManiSkill env."""
+
+    def __init__(self, *, chunk_size: int = 10):
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        self.chunk_size = int(chunk_size)
+
+    def _target(self, base_env: Any) -> tuple[Any, float, str]:
+        (
+            _solver_cls,
+            compute_grasp_info_by_obb,
+            get_actor_obb,
+            sapien,
+        ) = _load_motion_planning_symbols()
+        grasped = _as_bool(base_env.agent.is_grasping(base_env.peg, max_angle=20))
+        partial = _as_bool(getattr(base_env, "_online_partial_insert", False))
+        if not grasped:
+            obb = get_actor_obb(base_env.peg)
+            approaching = np.array([0.0, 0.0, -1.0])
+            target_closing = _as_numpy(
+                base_env.agent.tcp.pose.to_transformation_matrix()[0, :3, 1]
+            )
+            grasp_info = compute_grasp_info_by_obb(
+                obb,
+                approaching=approaching,
+                target_closing=target_closing,
+                depth=0.025,
+            )
+            grasp_pose = base_env.agent.build_grasp_pose(
+                approaching, grasp_info["closing"], grasp_info["center"]
+            )
+            offset = sapien.Pose(
+                [-max(0.05, float(base_env.peg_half_sizes[0, 0]) / 2 + 0.01), 0, 0]
+            )
+            grasp_pose = grasp_pose * offset
+            tcp = _first_vector(base_env.agent.tcp.pose.p, 3)
+            peg = _first_vector(base_env.peg.pose.p, 3)
+            near_grasp = float(np.linalg.norm(tcp - peg)) < 0.07
+            if near_grasp:
+                return grasp_pose, -1.0, "grasp"
+            return grasp_pose * sapien.Pose([0, 0, -0.05]), 1.0, "reach"
+
+        tcp_pose = base_env.agent.tcp.pose
+        insert_pose = base_env.goal_pose * base_env.peg.pose.inv() * tcp_pose
+        if partial:
+            return insert_pose * sapien.Pose([0.05, 0, 0]), -1.0, "insert"
+        return insert_pose * sapien.Pose([-0.05, 0, 0]), -1.0, "preinsert"
+
+    def _plan_qpos_path(self, env: Any, target_pose: Any) -> np.ndarray | None:
+        solver_cls, _grasp, _obb, _sapien = _load_motion_planning_symbols()
+        base_env = env.unwrapped
+        solver = solver_cls(
+            env,
+            debug=False,
+            vis=False,
+            base_pose=base_env.agent.robot.pose,
+            visualize_target_grasp_pose=False,
+            print_env_info=False,
+            joint_vel_limits=0.5,
+            joint_acc_limits=0.5,
+        )
+        pose = target_pose
+        target = np.concatenate([_first_vector(pose.p, 3), _first_vector(pose.q, 4)])
+        qpos = _as_numpy(base_env.agent.robot.get_qpos()).reshape(-1, 9)[0]
+        result = solver.planner.plan_screw(
+            target,
+            qpos,
+            time_step=float(base_env.control_timestep),
+            use_point_cloud=False,
+        )
+        if result.get("status") != "Success":
+            result = solver.planner.plan_qpos_to_pose(
+                target,
+                qpos,
+                time_step=float(base_env.control_timestep),
+                wrt_world=True,
+            )
+        if result.get("status") != "Success":
+            return None
+        return np.asarray(result["position"], dtype=np.float32)
+
+    def plan(self, env: Any) -> PegOraclePlan:
+        base_env = env.unwrapped
+        if str(base_env.control_mode) != "pd_joint_delta_pos":
+            raise ValueError("Peg privileged oracle requires pd_joint_delta_pos")
+        target_pose, gripper, phase = self._target(base_env)
+        path = self._plan_qpos_path(env, target_pose)
+        current_qpos = _as_numpy(base_env.agent.robot.get_qpos()).reshape(-1, 9)[0].astype(np.float32)
+        if path is None or len(path) == 0:
+            hold = np.zeros((self.chunk_size, 8), dtype=np.float32)
+            hold[:, -1] = gripper
+            return PegOraclePlan(hold, phase, False)
+
+        lower = np.full(7, _DEFAULT_ARM_DELTA_LOWER, dtype=np.float32)
+        upper = np.full(7, _DEFAULT_ARM_DELTA_UPPER, dtype=np.float32)
+        actions: list[np.ndarray] = []
+        predicted_qpos = current_qpos.copy()
+        for step in range(self.chunk_size):
+            target_qpos = path[min(step, len(path) - 1), :7]
+            arm = _normalize_delta(target_qpos - predicted_qpos[:7], lower, upper)
+            actions.append(np.concatenate([arm.astype(np.float32), [gripper]]))
+            predicted_qpos[:7] = target_qpos
+        return PegOraclePlan(np.stack(actions), phase, True)

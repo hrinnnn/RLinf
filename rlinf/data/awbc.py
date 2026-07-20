@@ -259,6 +259,42 @@ class BalancedSourceBatchSampler(Sampler[list[int]]):
             yield [batch[index] for index in order]
 
 
+class UniformValidBatchSampler(Sampler[list[int]]):
+    """Shuffle all eligible rows without enforcing a source ratio."""
+
+    def __init__(
+        self,
+        manifest: AWBCProgressManifest,
+        batch_size: int,
+        *,
+        seed: int = 0,
+        valid_only: bool = True,
+    ):
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        self.batch_size = int(batch_size)
+        self.seed = int(seed)
+        self.epoch = 0
+        self.indices = [
+            record.dataset_index for record in manifest if record.valid or not valid_only
+        ]
+        if not self.indices:
+            raise ValueError("AWBC sampler has no eligible records")
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __len__(self) -> int:
+        return math.ceil(len(self.indices) / self.batch_size)
+
+    def __iter__(self) -> Iterator[list[int]]:
+        generator = torch.Generator().manual_seed(self.seed + self.epoch)
+        order = torch.randperm(len(self.indices), generator=generator).tolist()
+        shuffled = [self.indices[index] for index in order]
+        for start in range(0, len(shuffled), self.batch_size):
+            yield shuffled[start : start + self.batch_size]
+
+
 class AWBCOpenPiDataLoader:
     """Preserve AWBC metadata that OpenPI's DataLoaderImpl normally drops."""
 
@@ -294,7 +330,7 @@ def attach_awbc_to_openpi_dataloader(
     openpi_data_loader: Any,
     *,
     manifest_path: str | Path,
-    expert_sampling_ratio: float,
+    expert_sampling_ratio: float | None,
     seed: int,
     dataset_override: Dataset | None = None,
     valid_only: bool = True,
@@ -316,13 +352,21 @@ def attach_awbc_to_openpi_dataloader(
         batch_size = getattr(pytorch_loader.batch_sampler, "batch_size", None)
     if batch_size is None:
         raise TypeError("Cannot determine OpenPI AWBC batch size")
-    batch_sampler = BalancedSourceBatchSampler(
-        manifest,
-        int(batch_size),
-        expert_sampling_ratio,
-        seed=seed,
-        valid_only=valid_only,
-    )
+    if expert_sampling_ratio is None:
+        batch_sampler: Sampler[list[int]] = UniformValidBatchSampler(
+            manifest,
+            int(batch_size),
+            seed=seed,
+            valid_only=valid_only,
+        )
+    else:
+        batch_sampler = BalancedSourceBatchSampler(
+            manifest,
+            int(batch_size),
+            expert_sampling_ratio,
+            seed=seed,
+            valid_only=valid_only,
+        )
 
     kwargs: dict[str, Any] = {
         "batch_sampler": batch_sampler,
