@@ -176,7 +176,11 @@ class PegPrivilegedChunkOracle:
             joint_vel_limits=0.5,
             joint_acc_limits=0.5,
         )
-        pose = target_pose
+        # ``PandaArmMotionPlanningSolver.move_to_pose_with_screw`` transforms
+        # world-frame targets into the planner's robot-base frame.  We call
+        # the lower-level planner to retain only one chunk, so preserve that
+        # official coordinate transform explicitly.
+        pose = solver._transform_pose_for_planning(target_pose)
         target = np.concatenate([_first_vector(pose.p, 3), _first_vector(pose.q, 4)])
         qpos = _as_numpy(base_env.agent.robot.get_qpos()).reshape(-1, 9)[0]
         result = solver.planner.plan_screw(
