@@ -121,8 +121,13 @@ def register_controlled_plug_charger_variants() -> None:
             relative_q[:, 0] = torch.cos(yaw / 2)
             relative_q[:, 3] = torch.sin(yaw / 2)
             orientation = rotation_conversions.quaternion_multiply(self.goal_pose.q[env_idx], relative_q)
-            position = self.charger.pose.p[env_idx].clone()
-            self.charger.set_pose(Pose.create_from_pq(position, orientation), env_idx=env_idx)
+            # Actor.set_pose updates the complete merged Actor in ManiSkill
+            # 3.0.  Preserve untouched vectorized environments during a
+            # partial reset, then write the updated full pose once.
+            position = self.charger.pose.p.clone()
+            full_orientation = self.charger.pose.q.clone()
+            full_orientation[env_idx] = orientation
+            self.charger.set_pose(Pose.create_from_pq(position, full_orientation))
             self.rlinf_relative_yaw = yaw
 
     @register_env(PLUG_CHARGER_ID_ENV_ID, max_episode_steps=200)
