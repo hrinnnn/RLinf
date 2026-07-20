@@ -30,6 +30,8 @@ from rlinf.envs.maniskill.plug_charger_variants import (
     register_controlled_plug_charger_variants,
     reset_metadata,
 )
+from rlinf.data.maniskill_plug_progress import PlugProgressState
+from rlinf.data.online_awbc import OnlineAWBCChunk, OnlineAWBCFrame, build_online_awbc_manifest
 from toolkits.lerobot.collect_maniskill_peg_lerobot_joint import (
     MAIN_CAMERA_CANDIDATES,
     WRIST_CAMERA_CANDIDATES,
@@ -126,22 +128,67 @@ def _run_reference(env: Any, seed: int) -> tuple[list[Any], list[Any], dict[str,
         env.step = step  # type: ignore[method-assign]
 
 
-def _replay(env: Any, seed: int, solver_actions: list[Any], lower, upper):
-    observation, _ = env.reset(seed=seed)
+def _replay(
+    env: Any,
+    seed: int,
+    solver_actions: list[Any],
+    lower,
+    upper,
+    *,
+    episode_index: int,
+    dataset_offset: int,
+    chunk_size: int = 10,
+):
+    observation, info = env.reset(seed=seed)
     records = [_extract_record(observation)]
     actions = []
+    frames: list[OnlineAWBCFrame] = []
+    chunks: list[OnlineAWBCChunk] = []
+    progress = PlugProgressState()
+    phi = progress.update(env, info)
+    chunk_start = 0
+    chunk_phi = phi
     success = False
-    for solver_action in solver_actions:
+    for step_index, solver_action in enumerate(solver_actions):
+        if step_index % chunk_size == 0:
+            chunk_start = step_index
+            chunk_phi = phi
         action = _convert_solver_action_to_joint_delta(records[-1].qpos, solver_action, lower, upper)
+        frames.append(
+            OnlineAWBCFrame(
+                dataset_index=dataset_offset + step_index,
+                episode_index=episode_index,
+                frame_index=step_index,
+                source="expert",
+                phi=phi,
+            )
+        )
         observation, _reward, terminated, truncated, info = env.step(action)
         records.append(_extract_record(observation))
         actions.append(action)
         success = _bool_scalar(info.get("success"))
-        if success or _bool_scalar(terminated) or _bool_scalar(truncated):
+        phi = progress.update(env, info)
+        finished = success or _bool_scalar(terminated) or _bool_scalar(truncated)
+        if (step_index + 1) % chunk_size == 0 or finished:
+            chunks.append(
+                OnlineAWBCChunk(
+                    dataset_index=dataset_offset + chunk_start,
+                    episode_index=episode_index,
+                    frame_index=chunk_start,
+                    next_frame_index=step_index + 1,
+                    source="expert",
+                    phi=chunk_phi,
+                    phi_next=phi,
+                    vfd_score=0.0,
+                    threshold=float("nan"),
+                    success=success,
+                )
+            )
+        if finished:
             break
     if not success or len(records) != len(actions) + 1:
         return None
-    return records, actions
+    return records, actions, frames, chunks
 
 
 def parse_args() -> argparse.Namespace:
@@ -154,6 +201,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-attempts", type=int, default=256)
     parser.add_argument("--image-size", type=int, default=384)
     parser.add_argument("--control-freq", type=int, default=10)
+    parser.add_argument("--chunk-size", type=int, default=10)
     parser.add_argument("--max-episode-steps", type=int, default=200)
     parser.add_argument("--sim-backend", choices=("physx_cpu", "gpu"), default="physx_cpu")
     parser.add_argument("--overwrite", action="store_true")
@@ -181,6 +229,8 @@ def main() -> None:
     lower, upper = _joint_delta_arm_bounds(replay_env)
     dataset = None
     manifest_rows = []
+    all_frames: list[OnlineAWBCFrame] = []
+    all_chunks: list[OnlineAWBCChunk] = []
     main_camera = wrist_camera = ""
     saved = attempts = 0
     try:
@@ -191,10 +241,19 @@ def main() -> None:
             if reference is None:
                 continue
             reference_records, solver_actions, metadata = reference
-            replay = _replay(replay_env, seed, solver_actions, lower, upper)
+            replay = _replay(
+                replay_env,
+                seed,
+                solver_actions,
+                lower,
+                upper,
+                episode_index=saved,
+                dataset_offset=len(all_frames),
+                chunk_size=args.chunk_size,
+            )
             if replay is None:
                 continue
-            records, actions = replay
+            records, actions, episode_frames, episode_chunks = replay
             if not main_camera:
                 main_camera = _select_camera(records[0].obs, "", ("base_camera",) + MAIN_CAMERA_CANDIDATES, "main")
                 wrist_camera = _select_camera(records[0].obs, "", ("hand_camera",) + WRIST_CAMERA_CANDIDATES, "wrist")
@@ -205,6 +264,8 @@ def main() -> None:
                 dataset.add_frame(frame)
             dataset.save_episode()
             manifest_rows.append(build_episode_manifest_row(episode_index=saved, seed=seed, metadata=metadata))
+            all_frames.extend(episode_frames)
+            all_chunks.extend(episode_chunks)
             if args.save_videos:
                 _write_episode_video(frames, video_dir=_video_output_dir(args.repo_id, ""), episode_index=saved, seed=seed, fps=args.control_freq)
             saved += 1
@@ -216,6 +277,10 @@ def main() -> None:
     if saved != args.num_episodes:
         raise RuntimeError(f"collected {saved}/{args.num_episodes} successful {args.split} trajectories after {attempts} attempts")
     manifest_path.write_text("".join(json.dumps(row) + "\n" for row in manifest_rows), encoding="utf-8")
+    progress_rows = build_online_awbc_manifest(all_frames, all_chunks)
+    (args.output_dir / "progress.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in progress_rows), encoding="utf-8"
+    )
     (args.output_dir / "summary.json").write_text(json.dumps({"dataset": str(dataset_path), "split": args.split, "episodes": saved, "attempts": attempts}, indent=2) + "\n")
 
 
