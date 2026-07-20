@@ -131,7 +131,12 @@ class PlugChargerPrivilegedChunkOracle:
             actions = np.zeros((self.chunk_size, 8), dtype=np.float32)
             actions[:, -1] = gripper
             return PlugOraclePlan(actions, phase, False, gripper=gripper)
-        targets = np.asarray([path[min(index, len(path) - 1), :7] for index in range(self.chunk_size)], dtype=np.float32)
+        # ``plan_screw`` may return far more than ten finely sampled points.
+        # Executing only its prefix then replanning from scratch repeatedly
+        # stalls the reach phase.  Preserve the official path but resample it
+        # across this intervention's fixed action budget.
+        indices = np.linspace(0, len(path) - 1, num=self.chunk_size, dtype=np.int64)
+        targets = np.asarray([path[index, :7] for index in indices], dtype=np.float32)
         actions = np.zeros((self.chunk_size, 8), dtype=np.float32)
         actions[:, -1] = gripper
         return PlugOraclePlan(actions, phase, True, joint_targets=targets, gripper=gripper)
