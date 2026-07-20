@@ -48,9 +48,37 @@ def test_oracle_uses_cached_reach_pose_before_switching_to_grasp(monkeypatch):
     target, gripper, phase = oracle._target(env)
 
     assert target is grasp_pose
-    assert gripper == -1.0
+    assert gripper == 1.0
     assert phase == "grasp"
     assert oracle._phase == "grasp"
+
+
+def test_oracle_emits_a_hold_chunk_to_close_after_reaching_grasp(monkeypatch):
+    class Pose:
+        def __init__(self, point):
+            self.p = np.asarray([point], dtype=np.float32)
+
+    grasp_pose = Pose([0.0, 0.0, 0.05])
+    agent = type("Agent", (), {"tcp": type("Tcp", (), {"pose": grasp_pose})()})()
+    env = type("Env", (), {"agent": agent, "peg": object()})()
+    oracle = PegPrivilegedChunkOracle(chunk_size=10)
+    oracle._reach_pose = Pose([0.0, 0.0, 0.0])
+    oracle._grasp_pose = grasp_pose
+    oracle._peg_init_pose = object()
+    oracle._phase = "grasp"
+    monkeypatch.setattr(oracle, "_initialize_reference_poses", lambda _env: None)
+    monkeypatch.setattr(
+        peg_privileged_oracle,
+        "_load_motion_planning_symbols",
+        lambda: (None, None, None, None),
+    )
+
+    target, gripper, phase = oracle._target(env)
+
+    assert target is None
+    assert gripper == -1.0
+    assert phase == "close"
+    assert oracle._phase == "preinsert"
 
 
 def test_oracle_converts_joint_target_against_live_qpos():

@@ -133,7 +133,7 @@ class PegPrivilegedChunkOracle:
         self._grasp_pose = grasp_pose * offset
         self._reach_pose = self._grasp_pose * sapien.Pose([0, 0, -0.05])
 
-    def _target(self, base_env: Any) -> tuple[Any, float, str]:
+    def _target(self, base_env: Any) -> tuple[Any | None, float, str]:
         _solver_cls, _grasp, _obb, sapien = _load_motion_planning_symbols()
         self._initialize_reference_poses(base_env)
         assert self._peg_init_pose is not None
@@ -146,12 +146,16 @@ class PegPrivilegedChunkOracle:
                 return self._reach_pose, 1.0, "reach"
 
         if self._phase == "grasp":
-            # The reference solver closes for six control steps.  A chunk can
-            # be shorter than the remaining motion, so retain this waypoint
-            # until the actual TCP reaches it.
+            # The reference solver reaches the grasp pose with an open
+            # gripper, then closes while holding the final arm qpos.
             if self._at_pose(base_env.agent.tcp.pose, self._grasp_pose):
-                self._phase = "preinsert"
-            return self._grasp_pose, -1.0, "grasp"
+                self._phase = "close"
+            else:
+                return self._grasp_pose, 1.0, "grasp"
+
+        if self._phase == "close":
+            self._phase = "preinsert"
+            return None, -1.0, "close"
 
         insert_pose = base_env.goal_pose * self._peg_init_pose.inv() * self._grasp_pose
         if self._phase == "preinsert":
@@ -205,6 +209,10 @@ class PegPrivilegedChunkOracle:
         if str(base_env.control_mode) != "pd_joint_delta_pos":
             raise ValueError("Peg privileged oracle requires pd_joint_delta_pos")
         target_pose, gripper, phase = self._target(base_env)
+        if target_pose is None:
+            hold = np.zeros((self.chunk_size, 8), dtype=np.float32)
+            hold[:, -1] = gripper
+            return PegOraclePlan(hold, phase, True, gripper=gripper)
         path = self._plan_qpos_path(env, target_pose)
         if path is None or len(path) == 0:
             hold = np.zeros((self.chunk_size, 8), dtype=np.float32)
