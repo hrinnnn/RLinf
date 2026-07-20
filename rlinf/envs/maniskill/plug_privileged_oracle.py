@@ -96,7 +96,12 @@ class PlugChargerPrivilegedChunkOracle:
         if self._phase == "preinsert":
             if not self._at_pose(base_env.agent.tcp.pose, preinsert):
                 return preinsert, -1.0, "preinsert"
+            # The official solver deliberately moves to the pre-insert pose
+            # twice, using a second refined path before final insertion.
+            self._phase = "preinsert_refine"
+        if self._phase == "preinsert_refine":
             self._phase = "insert"
+            return preinsert, -1.0, "preinsert_refine"
         return insert, -1.0, "insert"
 
     def _plan_path(self, env: Any, target_pose: Any) -> np.ndarray | None:
