@@ -55,6 +55,34 @@ def is_controlled_plug_charger_env_id(env_id: str) -> bool:
     return env_id in {PLUG_CHARGER_ID_ENV_ID, PLUG_CHARGER_OOD_ENV_ID}
 
 
+def default_plug_instruction(*, num_envs: int) -> list[str]:
+    return [PLUG_CHARGER_TASK for _ in range(num_envs)]
+
+
+def wrap_plug_charger_openpi_joint_obs(
+    raw_obs: dict[str, Any],
+    *,
+    task_descriptions: list[str] | None = None,
+) -> dict[str, Any]:
+    """Map official PlugCharger RGB observations to the pi0.5 contract."""
+
+    import torch
+
+    sensor_data = raw_obs.pop("sensor_data")
+    raw_obs.pop("sensor_param", None)
+    main_images = sensor_data["base_camera"]["rgb"]
+    wrist_images = sensor_data["hand_camera"]["rgb"]
+    batch_size = int(main_images.shape[0])
+    return {
+        "main_images": main_images,
+        "wrist_images": wrist_images,
+        "extra_view_images": None,
+        "states": raw_obs["agent"]["qpos"],
+        "task_descriptions": task_descriptions or default_plug_instruction(num_envs=batch_size),
+        "task_ids": torch.zeros(batch_size, dtype=torch.long, device=main_images.device),
+    }
+
+
 def reset_metadata(env: Any) -> dict[str, Any]:
     """Create JSON-safe reset provenance after ``env.reset``.
 
