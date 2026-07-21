@@ -19,6 +19,8 @@ from rlinf.workers.actor.fsdp_rlt_ac_policy_worker import RLTACLossMixin
 from rlinf.workers.env.env_worker import _build_reward_done_payload
 from toolkits.lerobot.collect_maniskill_peg_lerobot_joint import (
     FrameRecord,
+    _build_frames,
+    _extract_record,
     _write_grm_goal_bank,
 )
 
@@ -151,3 +153,36 @@ def test_successful_terminal_record_writes_goal_bank(tmp_path):
         "main": "goal_main.png",
         "wrist": "goal_wrist.png",
     }
+
+
+def test_extract_record_snapshots_reused_maniskill_rgb_buffers():
+    main = np.full((1, 4, 4, 3), 7, dtype=np.uint8)
+    wrist = np.full((1, 4, 4, 3), 13, dtype=np.uint8)
+    qpos = np.zeros((1, 9), dtype=np.float32)
+    observation = {
+        "agent": {"qpos": qpos},
+        "sensor_data": {
+            "base_camera": {"rgb": main},
+            "hand_camera": {"rgb": wrist},
+        },
+    }
+
+    first = _extract_record(observation)
+
+    # Simulate ManiSkill filling the same backing arrays on the next step.
+    main.fill(101)
+    wrist.fill(211)
+    qpos.fill(3.0)
+    second = _extract_record(observation)
+    frames = _build_frames(
+        records=[first, second],
+        actions=[np.zeros(8, dtype=np.float32)],
+        task="plug the charger into the receptacle",
+        main_camera="base_camera",
+        wrist_camera="hand_camera",
+    )
+
+    assert np.all(frames[0]["image"] == 7)
+    assert np.all(frames[0]["wrist_image"] == 13)
+    assert np.all(first.qpos == 0.0)
+    assert np.all(second.qpos == 3.0)

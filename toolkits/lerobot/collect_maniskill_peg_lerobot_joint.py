@@ -187,7 +187,28 @@ def _extract_record(obs: dict[str, Any]) -> FrameRecord:
             f"Expected Panda qpos with at least 9 values, got {qpos.shape}"
         )
     state = qpos[:STATE_DIM].astype(np.float32)
-    return FrameRecord(obs=obs, state=state, qpos=qpos.astype(np.float32))
+    # ManiSkill reuses its observation buffers across env.step calls.  The
+    # collector keeps records until an episode finishes, so retaining `obs`
+    # itself makes every recorded RGB image alias the last buffer contents.
+    # Snapshot the sensor values at collection time instead.
+    sensor_data = obs.get("sensor_data", {})
+    snapshot_sensors: dict[str, dict[str, np.ndarray]] = {}
+    for camera_name, sensor in sensor_data.items():
+        if not isinstance(sensor, dict):
+            continue
+        snapshot_sensors[camera_name] = {
+            key: _to_numpy(value, squeeze_env_dim=False).copy()
+            for key, value in sensor.items()
+        }
+    snapshot_obs = {
+        "sensor_data": snapshot_sensors,
+        "agent": {"qpos": qpos.copy()},
+    }
+    return FrameRecord(
+        obs=snapshot_obs,
+        state=state.copy(),
+        qpos=qpos.copy(),
+    )
 
 
 def _broadcast_vector(value: Any, *, dim: int) -> np.ndarray:
