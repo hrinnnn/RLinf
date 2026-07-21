@@ -21,6 +21,7 @@ from toolkits.lerobot.collect_maniskill_peg_lerobot_joint import (
     FrameRecord,
     _build_frames,
     _extract_record,
+    validate_visual_motion,
     _write_grm_goal_bank,
 )
 
@@ -186,3 +187,32 @@ def test_extract_record_snapshots_reused_maniskill_rgb_buffers():
     assert np.all(frames[0]["wrist_image"] == 13)
     assert np.all(first.qpos == 0.0)
     assert np.all(second.qpos == 3.0)
+
+
+def test_visual_motion_validation_rejects_static_camera_sequence():
+    static = np.zeros((4, 4, 3), dtype=np.uint8)
+    frames = [
+        {"image": static.copy(), "wrist_image": static.copy()},
+        {"image": static.copy(), "wrist_image": static.copy()},
+    ]
+
+    with pytest.raises(RuntimeError, match="Captured RGB sequence is static"):
+        validate_visual_motion(frames, min_peak_mean_abs_delta=1.0)
+
+
+def test_visual_motion_validation_accepts_moving_wrist_camera():
+    frames = [
+        {
+            "image": np.zeros((4, 4, 3), dtype=np.uint8),
+            "wrist_image": np.zeros((4, 4, 3), dtype=np.uint8),
+        },
+        {
+            "image": np.zeros((4, 4, 3), dtype=np.uint8),
+            "wrist_image": np.full((4, 4, 3), 5, dtype=np.uint8),
+        },
+    ]
+
+    assert validate_visual_motion(frames, min_peak_mean_abs_delta=1.0) == {
+        "image": 0.0,
+        "wrist_image": 5.0,
+    }

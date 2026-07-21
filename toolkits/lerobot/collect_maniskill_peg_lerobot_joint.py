@@ -370,6 +370,39 @@ def _make_video_frame(frame: dict[str, Any]) -> np.ndarray:
     return np.concatenate([main, gap, wrist], axis=1)
 
 
+def validate_visual_motion(
+    frames: list[dict[str, Any]], *, min_peak_mean_abs_delta: float
+) -> dict[str, float]:
+    """Reject a captured trajectory whose camera frames are all static.
+
+    A successful simulator state trajectory is not enough for a VLA dataset:
+    the images must be captured at every step as well.  Compare every later
+    frame with the first frame so a short-lived but visible motion is retained
+    even if the final view resembles the initial one.
+    """
+    if len(frames) < 2:
+        raise ValueError("Need at least two frames to validate visual motion")
+    if min_peak_mean_abs_delta < 0:
+        raise ValueError("min_peak_mean_abs_delta must be non-negative")
+
+    deltas: dict[str, float] = {}
+    for image_key in ("image", "wrist_image"):
+        first = np.asarray(frames[0][image_key], dtype=np.int16)
+        deltas[image_key] = max(
+            float(np.abs(np.asarray(frame[image_key], dtype=np.int16) - first).mean())
+            for frame in frames[1:]
+        )
+
+    if max(deltas.values()) < min_peak_mean_abs_delta:
+        raise RuntimeError(
+            "Captured RGB sequence is static: "
+            f"image_peak_delta={deltas['image']:.6f}, "
+            f"wrist_peak_delta={deltas['wrist_image']:.6f}, "
+            f"required>={min_peak_mean_abs_delta:.6f}"
+        )
+    return deltas
+
+
 def _write_episode_video(
     frames: list[dict[str, Any]],
     *,

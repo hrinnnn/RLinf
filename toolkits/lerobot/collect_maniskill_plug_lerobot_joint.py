@@ -45,6 +45,7 @@ from toolkits.lerobot.collect_maniskill_peg_lerobot_joint import (
     _select_camera,
     _solver_success,
     _to_numpy,
+    validate_visual_motion,
     _video_output_dir,
     _write_episode_video,
     _convert_solver_action_to_joint_delta,
@@ -231,6 +232,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--control-freq", type=int, default=10)
     parser.add_argument("--chunk-size", type=int, default=10)
     parser.add_argument("--max-episode-steps", type=int, default=200)
+    parser.add_argument("--min-visual-change", type=float, default=1.0)
     parser.add_argument("--sim-backend", choices=("physx_cpu", "gpu"), default="physx_cpu")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--save-videos", action=argparse.BooleanOptionalAction, default=True)
@@ -286,6 +288,15 @@ def main() -> None:
                 main_camera = _select_camera(records[0].obs, "", ("base_camera",) + MAIN_CAMERA_CANDIDATES, "main")
                 wrist_camera = _select_camera(records[0].obs, "", ("hand_camera",) + WRIST_CAMERA_CANDIDATES, "wrist")
             frames = _build_frames(records=records, actions=actions, task=PLUG_CHARGER_TASK, main_camera=main_camera, wrist_camera=wrist_camera)
+            visual_deltas = validate_visual_motion(
+                frames, min_peak_mean_abs_delta=args.min_visual_change
+            )
+            LOG.info(
+                "Episode %d visual motion: image_peak_delta=%.3f wrist_peak_delta=%.3f",
+                saved,
+                visual_deltas["image"],
+                visual_deltas["wrist_image"],
+            )
             if dataset is None:
                 dataset = _create_dataset(repo_id=args.repo_id, image_shape=tuple(frames[0]["image"].shape), wrist_image_shape=tuple(frames[0]["wrist_image"].shape), fps=args.control_freq, image_writer_threads=4, image_writer_processes=4)
             for frame in frames:
