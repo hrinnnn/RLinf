@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import logging
@@ -257,6 +258,7 @@ class DopamineGRMRewardModel(BaseRewardModel):
         phi_clip = cfg.get("phi_clip", [0.0, 1.0])
         self.phi_clip = (float(phi_clip[0]), float(phi_clip[1]))
         self.request_timeout = float(cfg.get("request_timeout", 120.0))
+        self.request_workers = max(1, int(cfg.get("request_workers", 1)))
         self.max_tokens = int(cfg.get("max_tokens", 32))
         self.temperature = float(cfg.get("temperature", 0.0))
         self.num_envs = int(cfg.get("num_envs", 1))
@@ -434,9 +436,7 @@ class DopamineGRMRewardModel(BaseRewardModel):
     ) -> tuple[list[str], list[float]]:
         if not self.endpoint:
             raise ValueError("reward.model.grm_endpoint must be set for dopamine_grm")
-        outputs = []
-        latencies = []
-        for payload in payloads:
+        def request_one(payload: dict[str, Any]) -> tuple[str, float]:
             body = {
                 "model": self.model_name,
                 "messages": self._build_messages(payload["task"], payload["images"]),
@@ -457,16 +457,19 @@ class DopamineGRMRewardModel(BaseRewardModel):
                     data = json.loads(response.read().decode("utf-8"))
             except urllib.error.URLError as exc:
                 logger.warning("Dopamine GRM request failed: %s", exc)
-                outputs.append("")
-                latencies.append(time.perf_counter() - start_time)
-                continue
-            outputs.append(
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", data.get("choices", [{}])[0].get("text", ""))
+                return "", time.perf_counter() - start_time
+            output = data.get("choices", [{}])[0].get("message", {}).get(
+                "content", data.get("choices", [{}])[0].get("text", "")
             )
-            latencies.append(time.perf_counter() - start_time)
-        return outputs, latencies
+            return output, time.perf_counter() - start_time
+
+        # vLLM schedules concurrent OpenAI-compatible requests as a batch.  The
+        # executor preserves input ordering, so GRM modes remain aligned with
+        # their cache keys and raw metric records.
+        with ThreadPoolExecutor(max_workers=min(self.request_workers, len(payloads) or 1)) as executor:
+            responses = list(executor.map(request_one, payloads))
+        outputs, latencies = zip(*responses) if responses else ((), ())
+        return list(outputs), list(latencies)
 
     def _write_metric_record(self, record: dict[str, Any]) -> None:
         if self.metrics_log_path is None:
