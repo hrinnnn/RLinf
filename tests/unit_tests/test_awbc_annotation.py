@@ -98,3 +98,25 @@ def test_success_override_is_scoped_to_its_episode():
     assert rows[2]["success"] is False
     assert rows[2]["phi"] == 0.0
     assert rows[2]["phi_next"] == 0.2
+
+
+def test_manifest_can_use_ten_step_progress_with_five_step_annotations():
+    frames = _frames(0, 0, 16)
+    estimates = [
+        ProgressEstimate(0, 0, 0, 0.0, True),
+        ProgressEstimate(5, 0, 5, 0.1, True),
+        ProgressEstimate(10, 0, 10, 0.6, True),
+        ProgressEstimate(15, 0, 15, 0.9, True),
+    ]
+    rows = build_awbc_manifest_rows(
+        frames,
+        estimates,
+        stride_steps=5,
+        lookahead_steps=10,
+        source="policy",
+    )
+
+    assert rows[0]["valid"] and rows[0]["next_frame_index"] == 10
+    assert rows[0]["delta_phi"] == 0.6
+    assert rows[5]["valid"] and rows[5]["next_frame_index"] == 15
+    assert rows[10]["valid"] is False

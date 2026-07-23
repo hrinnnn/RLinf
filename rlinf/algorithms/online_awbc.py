@@ -87,3 +87,11 @@ def uniformly_spaced_chunk_indices(
     count = min(num_chunks, samples_per_episode)
     indices = np.linspace(0, num_chunks - 1, num=count, dtype=np.int64)
     return tuple(int(index) for index in np.unique(indices))
+
+
+def first_vfd_action_candidate(candidates: torch.Tensor) -> torch.Tensor:
+    """Select the exact VFD reference sample used as the policy action."""
+
+    if candidates.ndim != 4 or candidates.shape[1] < 1:
+        raise ValueError("VFD candidates must have shape [B,C,H,A] with C >= 1")
+    return candidates[:, 0]

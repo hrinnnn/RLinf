@@ -219,6 +219,131 @@ def compute_arm_awbc_weights(
     )
 
 
+def compute_flux_awbc_weights(
+    delta_phi,
+    episode_lengths,
+    *,
+    valid=None,
+    progress_threshold: float = 0.01,
+    sigma_multiplier: float = 2.0,
+    epsilon: float = 1e-6,
+    distributed: bool = False,
+    global_delta_phi=None,
+    global_episode_lengths=None,
+    global_valid=None,
+) -> AWBCWeightResult:
+    """Compute the thresholded AWBC rule used by the FluxVLA-style smoke.
+
+    Negative progress is rejected, progress above ``progress_threshold`` gets
+    full base weight, and the narrow near-zero band receives a continuous
+    mean/std weight. Episode-length scaling is applied before normalizing the
+    positive local batch to mean one.
+    """
+
+    if progress_threshold < 0:
+        raise ValueError("progress_threshold must be non-negative")
+    if sigma_multiplier <= 0:
+        raise ValueError("sigma_multiplier must be positive")
+
+    delta = _as_1d_tensor(delta_phi, name="delta_phi", dtype=torch.float32)
+    lengths = _as_1d_tensor(
+        episode_lengths,
+        name="episode_lengths",
+        device=delta.device,
+        dtype=torch.float32,
+    )
+    if delta.numel() != lengths.numel():
+        raise ValueError("delta_phi and episode_lengths must have the same length")
+    if torch.any(lengths <= 0):
+        raise ValueError("episode_lengths must be positive")
+    valid_tensor = (
+        torch.ones_like(delta, dtype=torch.bool)
+        if valid is None
+        else _as_1d_tensor(valid, name="valid", device=delta.device).bool()
+    )
+    if valid_tensor.numel() != delta.numel():
+        raise ValueError("valid and delta_phi must have the same length")
+
+    if global_delta_phi is not None:
+        if global_episode_lengths is None:
+            raise ValueError("global_episode_lengths is required with global_delta_phi")
+        stats_delta = _as_1d_tensor(
+            global_delta_phi,
+            name="global_delta_phi",
+            device=delta.device,
+            dtype=torch.float32,
+        )
+        stats_lengths = _as_1d_tensor(
+            global_episode_lengths,
+            name="global_episode_lengths",
+            device=delta.device,
+            dtype=torch.float32,
+        )
+        stats_valid = (
+            torch.ones_like(stats_delta, dtype=torch.bool)
+            if global_valid is None
+            else _as_1d_tensor(
+                global_valid, name="global_valid", device=delta.device
+            ).bool()
+        )
+    elif distributed:
+        stats_delta = _all_gather_variable_1d(delta.detach())
+        stats_lengths = _all_gather_variable_1d(lengths.detach())
+        stats_valid = _all_gather_variable_1d(valid_tensor.to(torch.uint8)).bool()
+    else:
+        stats_delta, stats_lengths, stats_valid = delta, lengths, valid_tensor
+    if not (
+        stats_delta.numel() == stats_lengths.numel() == stats_valid.numel()
+    ):
+        raise ValueError("global AWBC statistic inputs must have the same length")
+
+    valid_count = int(stats_valid.sum().item())
+    zero = delta.new_zeros(())
+    if valid_count == 0:
+        return AWBCWeightResult(
+            weights=torch.zeros_like(delta),
+            gains=torch.zeros_like(delta),
+            mean_episode_length=zero,
+            gain_mean=zero,
+            gain_std=zero,
+            valid_count=0,
+            used_fallback=False,
+        )
+
+    valid_stats = stats_delta[stats_valid]
+    delta_mean = torch.clamp(valid_stats.mean(), min=0.0)
+    delta_std = valid_stats.std(correction=0)
+    lower = delta_mean - sigma_multiplier * delta_std
+    upper = delta_mean + sigma_multiplier * delta_std
+    soft = ((delta - lower) / (upper - lower + epsilon)).clamp(0.0, 1.0)
+    base_weights = torch.where(
+        delta > progress_threshold,
+        torch.ones_like(delta),
+        torch.where(delta >= 0, soft, torch.zeros_like(delta)),
+    )
+    base_weights = torch.where(
+        valid_tensor, base_weights, torch.zeros_like(base_weights)
+    )
+
+    mean_episode_length = stats_lengths[stats_valid].mean()
+    length_factor = lengths / mean_episode_length
+    weights = base_weights * length_factor
+    positive = weights > 0
+    if positive.any():
+        weights = weights / weights[positive].mean().clamp_min(epsilon)
+
+    gains = delta * length_factor
+    return AWBCWeightResult(
+        weights=weights,
+        gains=gains,
+        mean_episode_length=mean_episode_length,
+        gain_mean=delta_mean,
+        gain_std=delta_std,
+        valid_count=valid_count,
+        used_fallback=False,
+    )
+
+
 def weighted_flow_matching_loss(
     element_loss: torch.Tensor, sample_weights: torch.Tensor | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:

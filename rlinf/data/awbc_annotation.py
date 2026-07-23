@@ -62,10 +62,13 @@ def build_awbc_manifest_rows(
     stride_steps: int,
     source: str,
     successful_episodes: set[int] | None = None,
+    lookahead_steps: int | None = None,
 ) -> list[dict[str, Any]]:
     if source not in {"expert", "policy"}:
         raise ValueError("source must be 'expert' or 'policy'")
     successful_episodes = successful_episodes or set()
+    if lookahead_steps is not None and lookahead_steps <= 0:
+        raise ValueError("lookahead_steps must be positive")
     estimate_by_index = {estimate.dataset_index: estimate for estimate in estimates}
     if len(estimate_by_index) != len(estimates):
         raise ValueError("duplicate progress estimates")
@@ -92,8 +95,24 @@ def build_awbc_manifest_rows(
             mode_phis: dict[str, float | None] = {}
             position = anchor_positions.get(frame.dataset_index)
             transition_success = False
-            if position is not None and position + 1 < len(anchors):
-                next_anchor = anchors[position + 1]
+            next_position = None
+            if position is not None:
+                if lookahead_steps is None:
+                    next_position = (
+                        position + 1 if position + 1 < len(anchors) else None
+                    )
+                else:
+                    next_position = next(
+                        (
+                            candidate
+                            for candidate in range(position + 1, len(anchors))
+                            if anchors[candidate].frame_index - frame.frame_index
+                            >= lookahead_steps
+                        ),
+                        None,
+                    )
+            if position is not None and next_position is not None:
+                next_anchor = anchors[next_position]
                 current_estimate = estimate_by_index.get(frame.dataset_index)
                 next_estimate = estimate_by_index.get(next_anchor.dataset_index)
                 valid = bool(
@@ -112,7 +131,7 @@ def build_awbc_manifest_rows(
                     mode_phis = dict(next_estimate.mode_phis)
                     transition_success = bool(
                         episode_index in successful_episodes
-                        and position + 1 == len(anchors) - 1
+                        and next_position == len(anchors) - 1
                     )
 
             rows.append(

@@ -5,7 +5,9 @@ from rlinf.envs.maniskill.stack_cube_variants import (
     STACK_CUBE_ID_BASE_JITTER,
     STACK_CUBE_ID_DISTANCE_RANGE,
     geometry_is_stack_cube_id,
+    geometry_is_stack_cube_ood,
     sample_stack_cube_id_xy,
+    sample_stack_cube_xy,
     stack_cube_id_geometry,
 )
 
@@ -34,3 +36,8 @@ def test_stack_cube_id_geometry_uses_narrow_sector_and_distance():
     assert geometry["distance"].max() <= STACK_CUBE_ID_DISTANCE_RANGE[1]
     assert np.abs(geometry["angle_offset"]).max() <= STACK_CUBE_ID_ANGLE_HALF_WIDTH
 
+
+def test_stack_cube_ood_is_opposite_and_disjoint_from_id():
+    base, obj = sample_stack_cube_xy(np.random.default_rng(23), 512, split="ood")
+    assert np.all(geometry_is_stack_cube_ood(obj, base))
+    assert not np.any(geometry_is_stack_cube_id(obj, base))

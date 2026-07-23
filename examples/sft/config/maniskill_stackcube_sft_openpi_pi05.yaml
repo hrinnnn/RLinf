@@ -45,6 +45,7 @@ awbc:
   weight_floor: 0.0
   phi_smoothing: "none"
   gain_clip: null
+  progress_threshold: 0.01
 
 actor:
   group_name: "ActorGroup"
@@ -101,4 +102,3 @@ reward:
 
 critic:
   use_critic_model: false
-

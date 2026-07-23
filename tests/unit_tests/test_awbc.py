@@ -17,8 +17,41 @@ import torch
 
 from rlinf.algorithms.awbc import (
     compute_arm_awbc_weights,
+    compute_flux_awbc_weights,
     weighted_flow_matching_loss,
 )
+
+
+def test_flux_weights_reject_negative_and_accept_clear_progress():
+    result = compute_flux_awbc_weights(
+        delta_phi=[-0.2, 0.0, 0.005, 0.02],
+        episode_lengths=[10, 10, 10, 10],
+    )
+    assert result.weights[0].item() == 0.0
+    assert result.weights[1].item() >= 0.0
+    assert result.weights[2].item() > 0.0
+    assert result.weights[3].item() > result.weights[2].item()
+    assert result.weights[result.weights > 0].mean().item() == pytest.approx(1.0)
+
+
+def test_flux_weights_zero_invalid_and_apply_episode_length_factor():
+    result = compute_flux_awbc_weights(
+        delta_phi=[0.02, 0.02, 0.5],
+        episode_lengths=[10, 20, 100],
+        valid=[True, True, False],
+    )
+    assert result.weights[2].item() == 0.0
+    assert result.weights[1].item() == pytest.approx(2 * result.weights[0].item())
+
+
+def test_flux_all_invalid_has_no_positive_weight_or_nan():
+    result = compute_flux_awbc_weights(
+        delta_phi=[0.3, 0.4],
+        episode_lengths=[10, 10],
+        valid=[False, False],
+    )
+    torch.testing.assert_close(result.weights, torch.zeros(2))
+    assert not torch.isnan(result.weights).any()
 
 
 def test_arm_formula_matches_hand_calculation():

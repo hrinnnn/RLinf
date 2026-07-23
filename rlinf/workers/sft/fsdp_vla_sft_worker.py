@@ -19,7 +19,10 @@ from omegaconf import DictConfig, ListConfig
 from torch.utils.data import ConcatDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 
-from rlinf.algorithms.awbc import compute_arm_awbc_weights
+from rlinf.algorithms.awbc import (
+    compute_arm_awbc_weights,
+    compute_flux_awbc_weights,
+)
 from rlinf.config import SupportedModel
 from rlinf.data.awbc import attach_awbc_to_openpi_dataloader
 from rlinf.data.lerobot_paths import resolve_lerobot_repo_id
@@ -146,6 +149,7 @@ class FSDPVlaSftWorker(FSDPSftWorker):
                 "uniform",
                 "arm_paper_exact",
                 "robodopamine_robust",
+                "flux_code",
             }:
                 raise ValueError(f"Unsupported AWBC mode: {mode}")
             robust = mode == "robodopamine_robust"
@@ -163,30 +167,55 @@ class FSDPVlaSftWorker(FSDPSftWorker):
             if mode == "uniform":
                 delta_phi = torch.zeros_like(delta_phi)
                 valid = torch.ones_like(valid, dtype=torch.bool)
-            result = compute_arm_awbc_weights(
-                delta_phi,
-                torch.as_tensor(batch["awbc_episode_length"], device=stats_device),
-                valid=valid,
-                confidence=torch.as_tensor(
-                    batch["awbc_confidence"], device=stats_device
-                ),
-                sigma_multiplier=float(self.awbc_cfg.get("sigma_multiplier", 2.0)),
-                negative_delta_policy=(
-                    str(self.awbc_cfg.get("negative_delta_policy", "continuous"))
-                    if robust
-                    else "continuous"
-                ),
-                confidence_power=(
-                    float(self.awbc_cfg.get("confidence_power", 0.0))
-                    if robust
-                    else 0.0
-                ),
-                weight_floor=(
-                    float(self.awbc_cfg.get("weight_floor", 0.0)) if robust else 0.0
-                ),
-                gain_clip=gain_clip,
-                distributed=self._world_size > 1,
+            episode_lengths = torch.as_tensor(
+                batch["awbc_episode_length"], device=stats_device
             )
+            if mode == "flux_code":
+                result = compute_flux_awbc_weights(
+                    delta_phi,
+                    episode_lengths,
+                    valid=valid,
+                    progress_threshold=float(
+                        self.awbc_cfg.get("progress_threshold", 0.01)
+                    ),
+                    sigma_multiplier=float(
+                        self.awbc_cfg.get("sigma_multiplier", 2.0)
+                    ),
+                    distributed=self._world_size > 1,
+                )
+            else:
+                result = compute_arm_awbc_weights(
+                    delta_phi,
+                    episode_lengths,
+                    valid=valid,
+                    confidence=torch.as_tensor(
+                        batch["awbc_confidence"], device=stats_device
+                    ),
+                    sigma_multiplier=float(
+                        self.awbc_cfg.get("sigma_multiplier", 2.0)
+                    ),
+                    negative_delta_policy=(
+                        str(
+                            self.awbc_cfg.get(
+                                "negative_delta_policy", "continuous"
+                            )
+                        )
+                        if robust
+                        else "continuous"
+                    ),
+                    confidence_power=(
+                        float(self.awbc_cfg.get("confidence_power", 0.0))
+                        if robust
+                        else 0.0
+                    ),
+                    weight_floor=(
+                        float(self.awbc_cfg.get("weight_floor", 0.0))
+                        if robust
+                        else 0.0
+                    ),
+                    gain_clip=gain_clip,
+                    distributed=self._world_size > 1,
+                )
             batch["awbc_weight"] = result.weights
 
             weights = result.weights.detach()
