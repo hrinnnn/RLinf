@@ -1120,11 +1120,18 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             batch_size,
             num_action_samples,
         ).mean(dim=1)
-        action_candidates = ode_states[-1].reshape(
+        raw_action_candidates = ode_states[-1]
+        env_action_candidates = self.output_transform(
+            {
+                "actions": raw_action_candidates,
+                "state": reference_conditioning["state"],
+            }
+        )["actions"]
+        action_candidates = env_action_candidates.reshape(
             batch_size,
             num_action_samples,
             self.config.action_horizon,
-            self.config.action_dim,
+            env_action_candidates.shape[-1],
         )
         return action_candidates, scores
 
