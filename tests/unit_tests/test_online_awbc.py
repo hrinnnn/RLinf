@@ -7,6 +7,7 @@ from rlinf.algorithms.online_awbc import (
     FixedThresholdChunkController,
     FixedVFDThreshold,
     HysteresisChunkController,
+    LatchingChunkController,
     uniformly_spaced_chunk_indices,
 )
 from rlinf.data.maniskill_peg_progress import PEG_PROGRESS_LEVELS, peg_privileged_phi
@@ -58,6 +59,16 @@ def test_hysteresis_controller_resets_release_streak_on_midband_score():
     assert controller.decide([9.5]).controllers == ("expert",)
     assert controller.decide([8.0]).controllers == ("expert",)
     assert controller.decide([8.0]).controllers == ("policy",)
+
+
+def test_latching_controller_never_returns_control_within_episode():
+    controller = LatchingChunkController(
+        FixedVFDThreshold(threshold=10.0, quantile=0.95, calibration_count=10)
+    )
+
+    assert controller.decide([9.0]).controllers == ("policy",)
+    assert controller.decide([10.1]).controllers == ("expert",)
+    assert controller.decide([0.0]).controllers == ("expert",)
 
 
 def test_uniform_calibration_sampling_covers_episode_extremes():

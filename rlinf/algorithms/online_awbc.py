@@ -119,6 +119,28 @@ class HysteresisChunkController:
         )
 
 
+class LatchingChunkController:
+    """Keep the expert in control for the rest of an episode after one trigger."""
+
+    def __init__(self, threshold: FixedVFDThreshold):
+        self.threshold = threshold
+        self._expert_active = False
+
+    def decide(self, scores: torch.Tensor | Sequence[float]) -> ChunkControlDecision:
+        values = torch.as_tensor(scores, dtype=torch.float32).reshape(-1)
+        if values.numel() != 1:
+            raise ValueError("latching control accepts exactly one VFD score")
+        score = float(values.item())
+        if not np.isfinite(score):
+            raise ValueError("VFD score must be finite")
+        self._expert_active = self._expert_active or score > self.threshold.threshold
+        return ChunkControlDecision(
+            vfd_scores=values,
+            expert_mask=torch.tensor([self._expert_active]),
+            threshold=self.threshold.threshold,
+        )
+
+
 def uniformly_spaced_chunk_indices(
     num_chunks: int, *, samples_per_episode: int
 ) -> tuple[int, ...]:
