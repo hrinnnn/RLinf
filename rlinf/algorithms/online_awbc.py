@@ -75,6 +75,50 @@ class FixedThresholdChunkController:
         )
 
 
+class HysteresisChunkController:
+    """Keep expert control until uncertainty is stably below a lower boundary."""
+
+    def __init__(
+        self,
+        threshold: FixedVFDThreshold,
+        *,
+        return_ratio: float = 0.9,
+        policy_release_streak: int = 2,
+    ):
+        if not 0.0 < return_ratio <= 1.0:
+            raise ValueError("return_ratio must lie in (0, 1]")
+        if policy_release_streak < 1:
+            raise ValueError("policy_release_streak must be positive")
+        self.threshold = threshold
+        self.return_threshold = threshold.threshold * return_ratio
+        self.policy_release_streak = policy_release_streak
+        self._expert_active = False
+        self._low_streak = 0
+
+    def decide(self, scores: torch.Tensor | Sequence[float]) -> ChunkControlDecision:
+        values = torch.as_tensor(scores, dtype=torch.float32).reshape(-1)
+        if values.numel() != 1:
+            raise ValueError("hysteresis control accepts exactly one VFD score")
+        score = float(values.item())
+        if not np.isfinite(score):
+            raise ValueError("VFD score must be finite")
+        if score > self.threshold.threshold:
+            self._expert_active = True
+            self._low_streak = 0
+        elif self._expert_active and score < self.return_threshold:
+            self._low_streak += 1
+            if self._low_streak >= self.policy_release_streak:
+                self._expert_active = False
+                self._low_streak = 0
+        elif self._expert_active:
+            self._low_streak = 0
+        return ChunkControlDecision(
+            vfd_scores=values,
+            expert_mask=torch.tensor([self._expert_active]),
+            threshold=self.threshold.threshold,
+        )
+
+
 def uniformly_spaced_chunk_indices(
     num_chunks: int, *, samples_per_episode: int
 ) -> tuple[int, ...]:

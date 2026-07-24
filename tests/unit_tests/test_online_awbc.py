@@ -6,6 +6,7 @@ import torch
 from rlinf.algorithms.online_awbc import (
     FixedThresholdChunkController,
     FixedVFDThreshold,
+    HysteresisChunkController,
     uniformly_spaced_chunk_indices,
 )
 from rlinf.data.maniskill_peg_progress import PEG_PROGRESS_LEVELS, peg_privileged_phi
@@ -30,6 +31,33 @@ def test_chunk_controller_recovers_policy_without_sticky_takeover():
     second = controller.decide(torch.tensor([0.8, 1.1]))
     assert first.controllers == ("expert", "policy")
     assert second.controllers == ("policy", "expert")
+
+
+def test_hysteresis_controller_keeps_expert_until_two_clear_chunks():
+    controller = HysteresisChunkController(
+        FixedVFDThreshold(threshold=10.0, quantile=0.95, calibration_count=10),
+        return_ratio=0.9,
+        policy_release_streak=2,
+    )
+
+    assert controller.decide([10.1]).controllers == ("expert",)
+    assert controller.decide([8.8]).controllers == ("expert",)
+    assert controller.decide([8.7]).controllers == ("policy",)
+    assert controller.decide([9.5]).controllers == ("policy",)
+
+
+def test_hysteresis_controller_resets_release_streak_on_midband_score():
+    controller = HysteresisChunkController(
+        FixedVFDThreshold(threshold=10.0, quantile=0.95, calibration_count=10),
+        return_ratio=0.9,
+        policy_release_streak=2,
+    )
+
+    controller.decide([10.1])
+    assert controller.decide([8.0]).controllers == ("expert",)
+    assert controller.decide([9.5]).controllers == ("expert",)
+    assert controller.decide([8.0]).controllers == ("expert",)
+    assert controller.decide([8.0]).controllers == ("policy",)
 
 
 def test_uniform_calibration_sampling_covers_episode_extremes():
