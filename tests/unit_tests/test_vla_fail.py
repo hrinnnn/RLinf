@@ -6,17 +6,25 @@ import pytest
 import torch
 
 from rlinf.algorithms.vla_fail import (
+    KNNStatistics,
     LLMDStatistics,
+    PCAResidualStatistics,
     assert_threshold_statistics_compatible,
     constant_split_conformal_threshold,
     failure_alert,
+    fit_knn_statistics,
     fit_llmd_statistics,
+    fit_pca_residual_statistics,
     fixed_gaussian_prior,
+    knn_score,
+    knn_token_scores,
     llmd_score,
     llmd_token_scores,
+    pca_residual_score,
     pool_valid_prefix_tokens,
     resolve_feature_probe_indices,
     velocity_normalized_acc,
+    vim_default_principal_dim,
 )
 
 
@@ -150,3 +158,52 @@ def test_vlm_bridge_pool_uses_only_valid_prefix_tokens() -> None:
 def test_vlm_bridge_pool_rejects_misaligned_mask() -> None:
     with pytest.raises(ValueError, match="must match"):
         pool_valid_prefix_tokens(torch.zeros(1, 2, 3), torch.ones(1, 3))
+
+
+def test_knn_uses_normalized_kth_squared_l2_distance_and_token_maximum() -> None:
+    features = torch.tensor(
+        [
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[0.0, 1.0], [1.0, 0.0]],
+            [[-1.0, 0.0], [0.0, -1.0]],
+        ]
+    )
+    stats = fit_knn_statistics(features, k=2)
+    query = torch.tensor([[[1.0, 0.0], [0.0, -2.0]]])
+
+    token_scores = knn_token_scores(query, stats)
+
+    # Both token positions have squared distances {0, 2, 4} to their ID bank,
+    # so the official second-nearest score is 2 for each position.
+    torch.testing.assert_close(token_scores, torch.tensor([[2.0, 2.0]]))
+    torch.testing.assert_close(knn_score(query, stats), torch.tensor([2.0]))
+    torch.testing.assert_close(
+        knn_score(query, KNNStatistics.from_state_dict(stats.state_dict())), torch.tensor([2.0])
+    )
+
+
+def test_pca_residual_is_zero_in_principal_subspace_and_positive_outside() -> None:
+    features = torch.tensor(
+        [
+            [[-2.0, 0.0, 0.0]],
+            [[-1.0, 0.0, 0.0]],
+            [[1.0, 0.0, 0.0]],
+            [[2.0, 0.0, 0.0]],
+        ]
+    )
+    stats = fit_pca_residual_statistics(features, principal_dim=1)
+    in_subspace = torch.tensor([[[3.0, 0.0, 0.0]]])
+    outside = torch.tensor([[[0.0, 4.0, 0.0]]])
+
+    assert pca_residual_score(in_subspace, stats).item() == pytest.approx(0.0, abs=1e-6)
+    assert pca_residual_score(outside, stats).item() == pytest.approx(4.0, abs=1e-6)
+    torch.testing.assert_close(
+        pca_residual_score(outside, PCAResidualStatistics.from_state_dict(stats.state_dict())),
+        pca_residual_score(outside, stats),
+    )
+
+
+def test_vim_default_principal_dimension_matches_official_dimension_rule() -> None:
+    assert vim_default_principal_dim(2048) == 1000
+    assert vim_default_principal_dim(1024) == 512
+    assert vim_default_principal_dim(256) == 128

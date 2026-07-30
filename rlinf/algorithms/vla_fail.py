@@ -156,6 +156,221 @@ def llmd_score(features: torch.Tensor, statistics: LLMDStatistics) -> torch.Tens
     return llmd_token_scores(features, statistics).amax(dim=-1)
 
 
+@dataclass(frozen=True)
+class KNNStatistics:
+    """L2-normalized ID feature bank for Deep kNN-style OOD scoring.
+
+    The bank remains token-wise so it can score both one-token VLM probes and
+    the ten Action Expert tokens without silently averaging action positions.
+    ``k`` follows the official KNN-OOD convention: return the squared L2
+    distance to the k-th nearest normalized ID feature.
+    """
+
+    bank: torch.Tensor
+    k: int
+    normalization_epsilon: float
+
+    def validate(self) -> None:
+        if self.bank.ndim != 3:
+            raise ValueError("kNN bank must have shape [tokens, observations, features]")
+        tokens, observations, features = self.bank.shape
+        if tokens < 1 or observations < self.k or features < 1:
+            raise ValueError("kNN bank has incompatible token, observation, or feature dimensions")
+        if self.k < 1:
+            raise ValueError("kNN k must be positive")
+        if self.normalization_epsilon <= 0:
+            raise ValueError("kNN normalization epsilon must be positive")
+
+    def state_dict(self) -> dict[str, object]:
+        self.validate()
+        return {
+            "bank": self.bank.cpu(),
+            "k": self.k,
+            "normalization_epsilon": self.normalization_epsilon,
+        }
+
+    @classmethod
+    def from_state_dict(cls, payload: Mapping[str, object]) -> "KNNStatistics":
+        result = cls(
+            bank=torch.as_tensor(payload["bank"], dtype=torch.float32),
+            k=int(payload["k"]),
+            normalization_epsilon=float(payload["normalization_epsilon"]),
+        )
+        result.validate()
+        return result
+
+
+def _l2_normalize(features: torch.Tensor, *, epsilon: float) -> torch.Tensor:
+    if epsilon <= 0:
+        raise ValueError("normalization epsilon must be positive")
+    return features / torch.linalg.vector_norm(features, dim=-1, keepdim=True).clamp_min(epsilon)
+
+
+def fit_knn_statistics(
+    features: torch.Tensor, *, k: int = 10, normalization_epsilon: float = 1e-10
+) -> KNNStatistics:
+    """Fit the normalized feature bank used by official Deep kNN OOD scoring."""
+
+    if features.ndim != 3:
+        raise ValueError("kNN features must have shape [observations, tokens, features]")
+    observations, tokens, hidden_dim = features.shape
+    if observations < k or tokens < 1 or hidden_dim < 1:
+        raise ValueError("kNN needs at least k observations and non-empty token features")
+    if not torch.isfinite(features).all():
+        raise ValueError("kNN features must be finite")
+    bank = _l2_normalize(features.detach().to(device="cpu", dtype=torch.float32), epsilon=normalization_epsilon)
+    result = KNNStatistics(bank=bank.permute(1, 0, 2).contiguous(), k=k, normalization_epsilon=normalization_epsilon)
+    result.validate()
+    return result
+
+
+def knn_token_scores(features: torch.Tensor, statistics: KNNStatistics) -> torch.Tensor:
+    """Return the official k-th normalized squared-L2 score for each token."""
+
+    statistics.validate()
+    if features.ndim != 3:
+        raise ValueError("kNN features must have shape [batch, tokens, features]")
+    batch, tokens, hidden_dim = features.shape
+    if (tokens, hidden_dim) != (statistics.bank.shape[0], statistics.bank.shape[2]):
+        raise ValueError("kNN feature shape does not match fitted bank")
+    values = _l2_normalize(features.to(dtype=torch.float32), epsilon=statistics.normalization_epsilon)
+    bank = statistics.bank.to(values.device)
+    per_token = []
+    for token in range(tokens):
+        # Both vectors have unit norm: ||q-b||² = 2 - 2 qᵀb. This is exactly
+        # IndexFlatL2 on normalized features, without requiring FAISS at runtime.
+        distances = (2.0 - 2.0 * values[:, token] @ bank[token].transpose(0, 1)).clamp_min(0.0)
+        per_token.append(distances.kthvalue(statistics.k, dim=-1).values)
+    scores = torch.stack(per_token, dim=-1)
+    if scores.shape != (batch, tokens) or not torch.isfinite(scores).all():
+        raise RuntimeError("kNN produced invalid token scores")
+    return scores
+
+
+def knn_score(features: torch.Tensor, statistics: KNNStatistics) -> torch.Tensor:
+    """Conservatively aggregate token-wise kNN OOD scores with a maximum."""
+
+    return knn_token_scores(features, statistics).amax(dim=-1)
+
+
+@dataclass(frozen=True)
+class PCAResidualStatistics:
+    """Per-token principal subspaces for a ViM-inspired residual baseline.
+
+    This intentionally stores only the feature-space residual. Full ViM also
+    needs classifier logits and a classifier head, neither of which exists at
+    the pi0.5 VLM-to-Action bridge.
+    """
+
+    mean: torch.Tensor
+    principal_components: torch.Tensor
+    principal_dim: int
+    num_observations: int
+
+    def validate(self) -> None:
+        if self.mean.ndim != 2 or self.principal_components.ndim != 3:
+            raise ValueError("PCA residual statistics have invalid rank")
+        tokens, features = self.mean.shape
+        if self.principal_components.shape[:2] != (tokens, features):
+            raise ValueError("PCA principal components have incompatible shape")
+        if self.principal_components.shape[2] != self.principal_dim:
+            raise ValueError("PCA principal component count does not match principal_dim")
+        if not 0 < self.principal_dim <= features or self.num_observations < 2:
+            raise ValueError("PCA residual statistics have invalid dimensions")
+
+    def state_dict(self) -> dict[str, object]:
+        self.validate()
+        return {
+            "mean": self.mean.cpu(),
+            "principal_components": self.principal_components.cpu(),
+            "principal_dim": self.principal_dim,
+            "num_observations": self.num_observations,
+        }
+
+    @classmethod
+    def from_state_dict(cls, payload: Mapping[str, object]) -> "PCAResidualStatistics":
+        result = cls(
+            mean=torch.as_tensor(payload["mean"], dtype=torch.float32),
+            principal_components=torch.as_tensor(payload["principal_components"], dtype=torch.float32),
+            principal_dim=int(payload["principal_dim"]),
+            num_observations=int(payload["num_observations"]),
+        )
+        result.validate()
+        return result
+
+
+def vim_default_principal_dim(hidden_dim: int) -> int:
+    """Use the official ViM dimension rule before removing its logit component."""
+
+    if hidden_dim < 2:
+        raise ValueError("PCA residual needs at least two hidden dimensions")
+    if hidden_dim >= 2048:
+        return 1000
+    if hidden_dim >= 768:
+        return 512
+    return hidden_dim // 2
+
+
+def fit_pca_residual_statistics(
+    features: torch.Tensor, *, principal_dim: int | None = None
+) -> PCAResidualStatistics:
+    """Fit ViM's principal feature subspace without its classifier-logit term."""
+
+    if features.ndim != 3:
+        raise ValueError("PCA residual features must have shape [observations, tokens, features]")
+    observations, tokens, hidden_dim = features.shape
+    if observations < 2 or tokens < 1 or hidden_dim < 2:
+        raise ValueError("PCA residual needs at least two observations and two hidden dimensions")
+    if not torch.isfinite(features).all():
+        raise ValueError("PCA residual features must be finite")
+    dimension = vim_default_principal_dim(hidden_dim) if principal_dim is None else principal_dim
+    if not 0 < dimension <= hidden_dim:
+        raise ValueError("PCA principal_dim must lie in [1, hidden_dim]")
+    values = features.detach().to(device="cpu", dtype=torch.float64)
+    mean = values.mean(dim=0)
+    centered = values - mean.unsqueeze(0)
+    covariance = torch.einsum("nth,ntk->thk", centered, centered) / observations
+    components = []
+    for token in range(tokens):
+        _eigenvalues, eigenvectors = torch.linalg.eigh(covariance[token])
+        components.append(eigenvectors[:, -dimension:])
+    result = PCAResidualStatistics(
+        mean=mean.to(dtype=torch.float32),
+        principal_components=torch.stack(components, dim=0).to(dtype=torch.float32),
+        principal_dim=dimension,
+        num_observations=observations,
+    )
+    result.validate()
+    return result
+
+
+def pca_residual_token_scores(features: torch.Tensor, statistics: PCAResidualStatistics) -> torch.Tensor:
+    """Return L2 distance outside each token's ID principal subspace."""
+
+    statistics.validate()
+    if features.ndim != 3:
+        raise ValueError("PCA residual features must have shape [batch, tokens, features]")
+    batch, tokens, hidden_dim = features.shape
+    if (tokens, hidden_dim) != tuple(statistics.mean.shape):
+        raise ValueError("PCA residual feature shape does not match fitted statistics")
+    values = features.to(dtype=torch.float32)
+    mean = statistics.mean.to(values.device)
+    components = statistics.principal_components.to(values.device)
+    centered = values - mean.unsqueeze(0)
+    coordinates = torch.einsum("bth,thr->btr", centered, components)
+    reconstruction = torch.einsum("btr,thr->bth", coordinates, components)
+    scores = torch.linalg.vector_norm(centered - reconstruction, dim=-1)
+    if scores.shape != (batch, tokens) or not torch.isfinite(scores).all():
+        raise RuntimeError("PCA residual produced invalid token scores")
+    return scores
+
+
+def pca_residual_score(features: torch.Tensor, statistics: PCAResidualStatistics) -> torch.Tensor:
+    """Conservatively aggregate token-wise PCA residual scores with a maximum."""
+
+    return pca_residual_token_scores(features, statistics).amax(dim=-1)
+
+
 def fixed_gaussian_prior(
     *, action_horizon: int, action_dim: int, seed: int, device: torch.device | str = "cpu"
 ) -> torch.Tensor:
