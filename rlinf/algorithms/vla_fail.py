@@ -13,9 +13,43 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 import torch
+
+
+def resolve_feature_probe_indices(
+    num_layers: int, fractions: Sequence[float]
+) -> tuple[int, ...]:
+    """Map human-readable layer fractions to stable zero-based block indices."""
+
+    if num_layers < 1:
+        raise ValueError("feature probe needs at least one transformer block")
+    indices = []
+    for fraction in fractions:
+        if not 0.0 < fraction <= 1.0:
+            raise ValueError(f"feature probe fraction must be in (0, 1], got {fraction}")
+        index = min(num_layers - 1, max(0, ceil(num_layers * fraction) - 1))
+        if index not in indices:
+            indices.append(index)
+    return tuple(indices)
+
+
+def pool_valid_prefix_tokens(hidden_states: torch.Tensor, pad_mask: torch.Tensor) -> torch.Tensor:
+    """Mean-pool only valid VLM prefix tokens into one fixed-shape feature."""
+
+    if hidden_states.ndim != 3:
+        raise ValueError(f"VLM hidden states must be [B,T,D], got {tuple(hidden_states.shape)}")
+    if pad_mask.ndim != 2 or tuple(pad_mask.shape) != tuple(hidden_states.shape[:2]):
+        raise ValueError(
+            "VLM prefix mask must match hidden-state batch and token dimensions: "
+            f"hidden={tuple(hidden_states.shape)}, mask={tuple(pad_mask.shape)}"
+        )
+    weights = pad_mask.to(device=hidden_states.device, dtype=hidden_states.dtype).unsqueeze(-1)
+    counts = weights.sum(dim=1, keepdim=True)
+    if torch.any(counts <= 0):
+        raise ValueError("every VLM prefix must contain at least one valid token")
+    return (hidden_states * weights).sum(dim=1, keepdim=True) / counts
 
 
 @dataclass(frozen=True)

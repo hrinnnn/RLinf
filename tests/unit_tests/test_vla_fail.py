@@ -10,10 +10,12 @@ from rlinf.algorithms.vla_fail import (
     assert_threshold_statistics_compatible,
     constant_split_conformal_threshold,
     failure_alert,
-    fixed_gaussian_prior,
     fit_llmd_statistics,
+    fixed_gaussian_prior,
     llmd_score,
     llmd_token_scores,
+    pool_valid_prefix_tokens,
+    resolve_feature_probe_indices,
     velocity_normalized_acc,
 )
 
@@ -119,3 +121,32 @@ def test_threshold_manifest_rejects_statistics_from_another_detector_asset() -> 
     assert_threshold_statistics_compatible({"llmd_statistics_sha256": "current"}, "current")
     with pytest.raises(ValueError, match="different LLMD statistics"):
         assert_threshold_statistics_compatible({"llmd_statistics_sha256": "old"}, "current")
+
+
+def test_multilayer_probe_fractions_select_completed_transformer_blocks() -> None:
+    assert resolve_feature_probe_indices(20, (0.25, 0.5, 0.75)) == (4, 9, 14)
+    # Fractions that round to the same layer must not produce duplicate probes.
+    assert resolve_feature_probe_indices(3, (0.25, 0.5, 0.75, 1.0)) == (0, 1, 2)
+    with pytest.raises(ValueError, match="fraction"):
+        resolve_feature_probe_indices(4, (0.0,))
+
+
+def test_vlm_bridge_pool_uses_only_valid_prefix_tokens() -> None:
+    hidden = torch.tensor(
+        [
+            [[1.0, 3.0], [3.0, 5.0], [100.0, 100.0]],
+            [[2.0, 4.0], [4.0, 8.0], [6.0, 10.0]],
+        ]
+    )
+    mask = torch.tensor([[1, 1, 0], [0, 1, 1]])
+
+    pooled = pool_valid_prefix_tokens(hidden, mask)
+
+    assert pooled.shape == (2, 1, 2)
+    torch.testing.assert_close(pooled[0, 0], torch.tensor([2.0, 4.0]))
+    torch.testing.assert_close(pooled[1, 0], torch.tensor([5.0, 9.0]))
+
+
+def test_vlm_bridge_pool_rejects_misaligned_mask() -> None:
+    with pytest.raises(ValueError, match="must match"):
+        pool_valid_prefix_tokens(torch.zeros(1, 2, 3), torch.ones(1, 3))

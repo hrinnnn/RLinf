@@ -29,6 +29,10 @@ from openpi.models_pytorch.pi0_pytorch import PI0Pytorch, make_att_2d_masks
 from torch.utils._pytree import tree_map
 
 from rlinf.algorithms.awbc import weighted_flow_matching_loss
+from rlinf.algorithms.vla_fail import (
+    pool_valid_prefix_tokens,
+    resolve_feature_probe_indices,
+)
 from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
 from rlinf.models.embodiment.modules.explore_noise_net import ExploreNoiseNet
 from rlinf.models.embodiment.modules.value_head import ValueHead
@@ -39,6 +43,28 @@ from rlinf.utils.pytree import register_pytree_dataclasses
 
 def _to_numpy(x):
     return np.asarray(x.detach().cpu()) if torch.is_tensor(x) else x
+
+
+def _first_hidden_tensor(value: Any) -> torch.Tensor:
+    """Extract a hidden-state tensor from common Transformer layer outputs."""
+
+    if torch.is_tensor(value):
+        return value
+    if hasattr(value, "last_hidden_state") and torch.is_tensor(value.last_hidden_state):
+        return value.last_hidden_state
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            try:
+                return _first_hidden_tensor(item)
+            except TypeError:
+                continue
+    if isinstance(value, dict):
+        for item in value.values():
+            try:
+                return _first_hidden_tensor(item)
+            except TypeError:
+                continue
+    raise TypeError(f"could not find a hidden-state tensor in {type(value)!r}")
 
 
 @dataclass(frozen=True)
@@ -1478,6 +1504,154 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         prior = prior.to(dtype=self.action_in_proj.weight.dtype)
         timestep = torch.ones(state.shape[0], device=device, dtype=torch.float32)
         return self.get_suffix_out(state, prefix_pad_masks, past_key_values, prior, timestep)
+
+    @torch.no_grad()
+    def extract_multilayer_llmd_features(
+        self,
+        env_obs,
+        fixed_prior: torch.Tensor,
+        *,
+        action_expert_fractions: Sequence[float] = (0.25, 0.5, 0.75),
+        capture_vlm: bool = True,
+        include_action_expert_final: bool = False,
+    ) -> dict[str, torch.Tensor]:
+        """Collect one fixed-prior feature from multiple π0.5 internal depths.
+
+        This is an offline analysis API.  It uses the same preprocessing,
+        π0.5 ``t=1`` fixed action prior, and final action feature as the
+        VLA-FAIL LLMD extractor, but captures intermediate Action Expert
+        blocks and VLM prefix features in the *same* forward pass.  VLM block
+        features are pooled over valid prefix tokens because their sequence
+        length is camera/tokenization dependent; Action Expert features retain
+        the ten action-token positions required by LLMD.
+        """
+
+        to_process_obs = self.obs_processor(env_obs)
+        processed_obs = self.input_transform(to_process_obs, transpose=False)
+        processed_obs = self.precision_processor(processed_obs)
+        observation = _model.Observation.from_dict(processed_obs)
+        return self.extract_multilayer_llmd_features_from_observation(
+            observation,
+            fixed_prior,
+            action_expert_fractions=action_expert_fractions,
+            capture_vlm=capture_vlm,
+            include_action_expert_final=include_action_expert_final,
+        )
+
+    @torch.no_grad()
+    def extract_multilayer_llmd_features_from_observation(
+        self,
+        observation: _model.Observation,
+        fixed_prior: torch.Tensor,
+        *,
+        action_expert_fractions: Sequence[float] = (0.25, 0.5, 0.75),
+        capture_vlm: bool = True,
+        include_action_expert_final: bool = False,
+    ) -> dict[str, torch.Tensor]:
+        """Multi-layer counterpart of :meth:`extract_llmd_action_features`.
+
+        Returned names embed the concrete block index, making an asset
+        unambiguous if the underlying π0.5 architecture changes.  The final
+        Action Expert feature is opt-in because the strict VLA-FAIL baseline
+        already persists that asset separately.
+        """
+
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(
+            observation, train=False
+        )
+        device = state.device
+        images = [image.to(device) for image in images]
+        img_masks = [mask.to(device) for mask in img_masks]
+        if lang_tokens is not None:
+            lang_tokens = lang_tokens.to(device)
+        if lang_masks is not None:
+            lang_masks = lang_masks.to(device)
+        state = state.to(device)
+
+        prior = torch.as_tensor(fixed_prior, device=device)
+        if prior.ndim == 2:
+            prior = prior.unsqueeze(0)
+        expected_tail = (self.config.action_horizon, self.config.action_dim)
+        if prior.ndim != 3 or tuple(prior.shape[1:]) != expected_tail:
+            raise ValueError(
+                "fixed_prior must have shape [batch, action_horizon, action_dim] "
+                f"or {expected_tail}, got {tuple(prior.shape)}"
+            )
+        if prior.shape[0] == 1 and state.shape[0] > 1:
+            prior = prior.expand(state.shape[0], -1, -1)
+        if prior.shape[0] != state.shape[0]:
+            raise ValueError(
+                f"fixed_prior batch {prior.shape[0]} does not match observation batch {state.shape[0]}"
+            )
+        prior = prior.to(dtype=self.action_in_proj.weight.dtype)
+        timestep = torch.ones(state.shape[0], device=device, dtype=torch.float32)
+
+        action_layers = self.paligemma_with_expert.gemma_expert.model.layers
+        action_indices = resolve_feature_probe_indices(
+            len(action_layers), action_expert_fractions
+        )
+        vlm_layers = self.paligemma_with_expert.paligemma.language_model.layers
+        vlm_indices = resolve_feature_probe_indices(len(vlm_layers), (0.5,)) if capture_vlm else ()
+        captured: dict[str, torch.Tensor] = {}
+        handles = []
+
+        def capture(name: str):
+            def hook(_module, _inputs, output):
+                captured[name] = _first_hidden_tensor(output)
+
+            return hook
+
+        try:
+            for index in action_indices:
+                handles.append(
+                    action_layers[index].register_forward_hook(
+                        capture(f"action_expert_block_{index:02d}")
+                    )
+                )
+            for index in vlm_indices:
+                handles.append(
+                    vlm_layers[index].register_forward_hook(capture(f"vlm_block_{index:02d}"))
+                )
+
+            prefix_output, prefix_pad_masks, past_key_values = self._build_prefix_cache(
+                images, img_masks, lang_tokens, lang_masks
+            )
+            suffix_out = self.get_suffix_out(
+                state, prefix_pad_masks, past_key_values, prior, timestep
+            )
+        finally:
+            for handle in handles:
+                handle.remove()
+
+        horizon = int(self.config.action_horizon)
+        result: dict[str, torch.Tensor] = {}
+        for index in action_indices:
+            name = f"action_expert_block_{index:02d}"
+            if name not in captured:
+                raise RuntimeError(f"Action Expert hook did not fire for block {index}")
+            feature = captured[name]
+            if feature.ndim != 3 or feature.shape[1] < horizon:
+                raise RuntimeError(
+                    f"Action Expert block {index} must produce [B,T,D] with T>={horizon}, "
+                    f"got {tuple(feature.shape)}"
+                )
+            result[name] = feature[:, -horizon:].to(dtype=torch.float32)
+
+        if capture_vlm:
+            for index in vlm_indices:
+                name = f"vlm_block_{index:02d}"
+                if name not in captured:
+                    raise RuntimeError(f"VLM hook did not fire for block {index}")
+                result[f"{name}_mean"] = pool_valid_prefix_tokens(
+                    captured[name], prefix_pad_masks
+                ).to(dtype=torch.float32)
+            result["vlm_bridge_final_mean"] = pool_valid_prefix_tokens(
+                prefix_output, prefix_pad_masks
+            ).to(dtype=torch.float32)
+
+        if include_action_expert_final:
+            result["action_expert_final"] = suffix_out.to(dtype=torch.float32)
+        return result
 
     def _build_prefix_cache(self, images, img_masks, lang_tokens, lang_masks):
         """Embed prefix tokens and compute KV cache for efficient suffix generation."""
