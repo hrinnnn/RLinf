@@ -26,6 +26,7 @@ from rlinf.algorithms.awbc import (
 from rlinf.config import SupportedModel
 from rlinf.data.awbc import attach_awbc_to_openpi_dataloader
 from rlinf.data.lerobot_paths import resolve_lerobot_repo_id
+from rlinf.data.openpi_mixture import attach_source_balanced_openpi_dataloader
 from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.utils.utils import get_rng_state, set_rng_state
 from rlinf.workers.sft.fsdp_sft_worker import FSDPSftWorker
@@ -41,7 +42,7 @@ class FSDPVlaSftWorker(FSDPSftWorker):
             awbc_enabled = bool(self.awbc_cfg.get("enabled", False))
             path_entries = (
                 list(data_paths)
-                if awbc_enabled and isinstance(data_paths, (list, tuple, ListConfig))
+                if isinstance(data_paths, (list, tuple, ListConfig))
                 else [data_paths]
             )
             repo_ids = [resolve_lerobot_repo_id(entry) for entry in path_entries]
@@ -97,6 +98,22 @@ class FSDPVlaSftWorker(FSDPSftWorker):
                     seed=int(self.cfg.actor.get("seed", 0)) + self._rank,
                     dataset_override=combined_dataset,
                     valid_only=bool(self.awbc_cfg.get("sample_valid_only", True)),
+                )
+            elif not eval_dataset and len(data_loaders) > 1:
+                if not bool(self.cfg.data.get("openpi_source_balanced", False)):
+                    raise ValueError(
+                        "OpenPI ordinary SFT with multiple data paths requires "
+                        "data.openpi_source_balanced=true to avoid silently ignoring sources"
+                    )
+                if len(data_loaders) != 2:
+                    raise ValueError("source-balanced OpenPI SFT currently supports exactly two sources")
+                data_loader = attach_source_balanced_openpi_dataloader(
+                    data_loader,
+                    datasets=[
+                        self._openpi_pytorch_dataloader(loader).dataset
+                        for loader in data_loaders
+                    ],
+                    seed=int(self.cfg.actor.get("seed", 0)) + self._rank,
                 )
             return data_loader, data_loader.data_config()
         elif SupportedModel(self.cfg.actor.model.model_type) in [
