@@ -1422,6 +1422,63 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         v_t = self.action_out_proj(suffix_out)
         return v_t, suffix_out
 
+    @torch.no_grad()
+    def extract_llmd_action_features(self, env_obs, fixed_prior: torch.Tensor) -> torch.Tensor:
+        """Return final Action Expert features for VLA-FAIL LLMD.
+
+        The feature is the final action-token representation immediately before
+        ``action_out_proj``.  π0.5 interpolates from noise at timestep 1 to an
+        action at timestep 0, so VLA-FAIL's fixed Gaussian *prior* is queried
+        at ``t=1`` here even though the paper denotes its prior as ``t=0``.
+        ``fixed_prior`` must be shared across all queried observations.
+        """
+
+        to_process_obs = self.obs_processor(env_obs)
+        processed_obs = self.input_transform(to_process_obs, transpose=False)
+        processed_obs = self.precision_processor(processed_obs)
+        observation = _model.Observation.from_dict(processed_obs)
+        return self.extract_llmd_action_features_from_observation(observation, fixed_prior)
+
+    @torch.no_grad()
+    def extract_llmd_action_features_from_observation(
+        self, observation: _model.Observation, fixed_prior: torch.Tensor
+    ) -> torch.Tensor:
+        """LLMD feature extraction for an already transformed OpenPI observation."""
+
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(
+            observation, train=False
+        )
+        device = state.device
+        images = [image.to(device) for image in images]
+        img_masks = [mask.to(device) for mask in img_masks]
+        if lang_tokens is not None:
+            lang_tokens = lang_tokens.to(device)
+        if lang_masks is not None:
+            lang_masks = lang_masks.to(device)
+        state = state.to(device)
+        _, prefix_pad_masks, past_key_values = self._build_prefix_cache(
+            images, img_masks, lang_tokens, lang_masks
+        )
+
+        prior = torch.as_tensor(fixed_prior, device=device)
+        if prior.ndim == 2:
+            prior = prior.unsqueeze(0)
+        expected_tail = (self.config.action_horizon, self.config.action_dim)
+        if prior.ndim != 3 or tuple(prior.shape[1:]) != expected_tail:
+            raise ValueError(
+                "fixed_prior must have shape [batch, action_horizon, action_dim] "
+                f"or {expected_tail}, got {tuple(prior.shape)}"
+            )
+        if prior.shape[0] == 1 and state.shape[0] > 1:
+            prior = prior.expand(state.shape[0], -1, -1)
+        if prior.shape[0] != state.shape[0]:
+            raise ValueError(
+                f"fixed_prior batch {prior.shape[0]} does not match observation batch {state.shape[0]}"
+            )
+        prior = prior.to(dtype=self.action_in_proj.weight.dtype)
+        timestep = torch.ones(state.shape[0], device=device, dtype=torch.float32)
+        return self.get_suffix_out(state, prefix_pad_masks, past_key_values, prior, timestep)
+
     def _build_prefix_cache(self, images, img_masks, lang_tokens, lang_masks):
         """Embed prefix tokens and compute KV cache for efficient suffix generation."""
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
