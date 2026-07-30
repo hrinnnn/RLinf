@@ -7,6 +7,7 @@ import torch
 
 from rlinf.algorithms.vla_fail import (
     LLMDStatistics,
+    assert_threshold_statistics_compatible,
     constant_split_conformal_threshold,
     failure_alert,
     fixed_gaussian_prior,
@@ -111,3 +112,10 @@ def test_failure_fusion_is_logical_or() -> None:
     assert failure_alert(llmd_value=3.0, llmd_threshold=2.0, acc_value=0.0, acc_threshold=1.0)
     assert failure_alert(llmd_value=0.0, llmd_threshold=2.0, acc_value=2.0, acc_threshold=1.0)
     assert not failure_alert(llmd_value=0.0, llmd_threshold=2.0, acc_value=0.5, acc_threshold=1.0)
+
+
+def test_threshold_manifest_rejects_statistics_from_another_detector_asset() -> None:
+    assert_threshold_statistics_compatible({}, "current")
+    assert_threshold_statistics_compatible({"llmd_statistics_sha256": "current"}, "current")
+    with pytest.raises(ValueError, match="different LLMD statistics"):
+        assert_threshold_statistics_compatible({"llmd_statistics_sha256": "old"}, "current")

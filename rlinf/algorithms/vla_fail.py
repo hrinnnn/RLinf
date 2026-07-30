@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 import torch
 
@@ -209,3 +209,21 @@ def failure_alert(
     if llmd_value >= llmd_threshold:
         return True
     return acc_value is not None and acc_threshold is not None and acc_value >= acc_threshold
+
+
+def assert_threshold_statistics_compatible(
+    threshold_payload: Mapping[str, Any], statistics_sha256: str
+) -> None:
+    """Reject thresholds calibrated from a different persistent LLMD asset.
+
+    Legacy files without a digest remain readable. Newly created calibration
+    files carry the digest so a later experiment cannot accidentally pair a
+    threshold with statistics from another checkpoint or feature distribution.
+    """
+
+    recorded = threshold_payload.get("llmd_statistics_sha256")
+    if recorded is not None and str(recorded) != statistics_sha256:
+        raise ValueError(
+            "Threshold was calibrated from different LLMD statistics: "
+            f"threshold={recorded}, current={statistics_sha256}"
+        )
