@@ -182,6 +182,20 @@ class FSDPVlaSftWorker(FSDPSftWorker):
 
     def get_train_model_output(self, batch: Any) -> tuple[torch.Tensor, dict[str, Any]]:
         awbc_metrics: dict[str, Any] = {}
+        temporal_mask_metrics: dict[str, Any] = {}
+        if isinstance(batch, dict) and "action_valid_mask" in batch:
+            mask = torch.as_tensor(batch["action_valid_mask"])
+            if mask.ndim != 2 or mask.shape[1] <= 0:
+                raise ValueError("action_valid_mask must have shape [batch, action_horizon]")
+            valid_steps = mask.to(dtype=torch.float32).sum(dim=1)
+            if torch.any(valid_steps <= 0):
+                raise ValueError("every batch sample must contain a valid action target")
+            temporal_mask_metrics = {
+                "temporal_mask_valid_fraction": mask.to(dtype=torch.float32)
+                .mean()
+                .item(),
+                "temporal_mask_min_valid_steps": valid_steps.min().item(),
+            }
         if bool(self.awbc_cfg.get("enabled", False)):
             if not isinstance(batch, dict):
                 raise TypeError("AWBC requires an OpenPI dictionary batch")
@@ -298,7 +312,11 @@ class FSDPVlaSftWorker(FSDPSftWorker):
         else:
             loss = output["loss"]
 
-        step_metrics = {"loss": loss.detach().item(), **awbc_metrics}
+        step_metrics = {
+            "loss": loss.detach().item(),
+            **temporal_mask_metrics,
+            **awbc_metrics,
+        }
         if isinstance(output, dict):
             for key, value in output.items():
                 if key == "loss":
