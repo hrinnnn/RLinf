@@ -111,19 +111,36 @@ class FSDPVlaSftWorker(FSDPSftWorker):
                     self._openpi_pytorch_dataloader(loader).dataset
                     for loader in data_loaders
                 ]
-                if bool(self.cfg.data.get("openpi_exclude_padded_action_targets", False)):
-                    from rlinf.data.openpi_mixture import ValidActionHorizonDataset
+                exclude_padded = bool(
+                    self.cfg.data.get("openpi_exclude_padded_action_targets", False)
+                )
+                mask_padded = bool(
+                    self.cfg.data.get("openpi_mask_padded_action_targets", False)
+                )
+                if exclude_padded and mask_padded:
+                    raise ValueError(
+                        "choose either OpenPI padded-target exclusion or temporal masking, not both"
+                    )
+                if exclude_padded or mask_padded:
+                    from rlinf.data.openpi_mixture import (
+                        ActionHorizonMaskDataset,
+                        OpenPIActionMaskDataLoader,
+                        ValidActionHorizonDataset,
+                    )
 
                     action_horizon = int(self.cfg.data.get("openpi_valid_action_horizon", 0))
                     if action_horizon <= 0:
                         raise ValueError(
-                            "data.openpi_valid_action_horizon must be positive when "
-                            "excluding padded OpenPI action targets"
+                            "data.openpi_valid_action_horizon must be positive when handling "
+                            "padded OpenPI action targets"
                         )
+                    wrapper = (
+                        ValidActionHorizonDataset
+                        if exclude_padded
+                        else ActionHorizonMaskDataset
+                    )
                     source_datasets = [
-                        ValidActionHorizonDataset(
-                            dataset, action_horizon=action_horizon
-                        )
+                        wrapper(dataset, action_horizon=action_horizon)
                         for dataset in source_datasets
                     ]
                 data_loader = attach_source_balanced_openpi_dataloader(
@@ -131,6 +148,8 @@ class FSDPVlaSftWorker(FSDPSftWorker):
                     datasets=source_datasets,
                     seed=int(self.cfg.actor.get("seed", 0)) + self._rank,
                 )
+                if mask_padded:
+                    data_loader = OpenPIActionMaskDataLoader(data_loader)
             return data_loader, data_loader.data_config()
         elif SupportedModel(self.cfg.actor.model.model_type) in [
             SupportedModel.LINGBOTVLA
@@ -348,6 +367,8 @@ class FSDPVlaSftWorker(FSDPSftWorker):
           TorchDataLoader._data_loader / .torch_loader -> torch.utils.data.DataLoader
 
         """
+        if hasattr(openpi_dataloader, "pytorch_loader"):
+            return openpi_dataloader.pytorch_loader
         torch_data_loader = getattr(openpi_dataloader, "_data_loader", None)
         pytorch_dl = getattr(torch_data_loader, "_data_loader", None) or getattr(
             torch_data_loader, "torch_loader", None

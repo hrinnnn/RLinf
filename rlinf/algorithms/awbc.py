@@ -345,17 +345,43 @@ def compute_flux_awbc_weights(
 
 
 def weighted_flow_matching_loss(
-    element_loss: torch.Tensor, sample_weights: torch.Tensor | None = None
+    element_loss: torch.Tensor,
+    sample_weights: torch.Tensor | None = None,
+    *,
+    element_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reduce PI0 per-element flow loss, optionally using per-sample weights."""
+    """Reduce PI0 flow loss with optional sample and temporal weights."""
 
     if element_loss.ndim == 0:
         raise ValueError("element_loss must include a batch dimension")
-    per_sample = (
-        element_loss
-        if element_loss.ndim == 1
-        else element_loss.reshape(element_loss.shape[0], -1).mean(dim=1)
-    )
+    if element_mask is None:
+        per_sample = (
+            element_loss
+            if element_loss.ndim == 1
+            else element_loss.reshape(element_loss.shape[0], -1).mean(dim=1)
+        )
+    else:
+        mask = torch.as_tensor(
+            element_mask, device=element_loss.device, dtype=element_loss.dtype
+        )
+        if mask.ndim == element_loss.ndim - 1:
+            mask = mask.unsqueeze(-1)
+        try:
+            mask = torch.broadcast_to(mask, element_loss.shape)
+        except RuntimeError as error:
+            raise ValueError(
+                "element_mask must broadcast to the per-element flow loss shape"
+            ) from error
+        flat_mask = mask.reshape(mask.shape[0], -1)
+        valid_count = flat_mask.sum(dim=1)
+        if torch.any(valid_count <= 0):
+            raise ValueError(
+                "every flow-matching sample must contain a valid action target"
+            )
+        per_sample = (
+            (element_loss * mask).reshape(mask.shape[0], -1).sum(dim=1)
+            / valid_count
+        )
     if sample_weights is None:
         return per_sample.mean(), per_sample
 

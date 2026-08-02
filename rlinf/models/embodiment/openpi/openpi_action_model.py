@@ -399,10 +399,12 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         if isinstance(data, tuple):
             observation, actions = data
             awbc_weight = None
+            action_valid_mask = None
         else:
             observation = data["observation"]
             actions = data["actions"]
             awbc_weight = data.get("awbc_weight")
+            action_valid_mask = data.get("action_valid_mask")
 
         device = next(self.parameters()).device
         register_pytree_dataclasses(observation)
@@ -430,7 +432,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         if use_action_chunk_loss:
             loss = loss[:, : self.config.action_chunk, : self.config.action_env_dim]
         vla_loss, per_sample_vla_loss = weighted_flow_matching_loss(
-            loss, awbc_weight
+            loss, awbc_weight, element_mask=action_valid_mask
         )
         if not self.config.use_rlt:
             if awbc_weight is not None:

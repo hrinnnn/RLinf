@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset
 
 from rlinf.data.openpi_mixture import (
+    ActionHorizonMaskDataset,
     SourceBalancedBatchSampler,
     ValidActionHorizonDataset,
 )
@@ -59,3 +60,16 @@ def test_valid_action_horizon_dataset_excludes_episode_tail_padding():
     assert len(dataset) == 32
     assert dataset[10] == {"source_index": 10}
     assert dataset[11] == {"source_index": 20}
+
+
+def test_action_horizon_mask_keeps_episode_tail_and_marks_only_padding():
+    dataset = ActionHorizonMaskDataset(
+        _TransformWrapper(_RawEpisodeDataset()), action_horizon=10
+    )
+    assert len(dataset) == 50
+    assert dataset[10]["source_index"] == 10
+    assert dataset[10]["action_valid_mask"].tolist() == [True] * 10
+    # At the final observation in [0, 20), only its first future action is real.
+    assert dataset[19]["action_valid_mask"].tolist() == [True] + [False] * 9
+    # The next episode starts fresh and cannot borrow actions from the previous one.
+    assert dataset[20]["action_valid_mask"].tolist() == [True] * 10
