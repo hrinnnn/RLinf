@@ -69,7 +69,10 @@ def sample_airplane_yaw(rng: Any, count: int, *, split: Literal["id", "ood"]) ->
         return np.asarray(rng.uniform(*PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGE, size=count), dtype=np.float64)
     if split != "ood":
         raise ValueError(f"unknown split: {split}")
-    interval_index = np.asarray(rng.integers(0, len(PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGES), size=count))
+    # ManiSkill's batched reset RNG wraps RandomState, whereas tests and
+    # standalone callers often use NumPy Generator.
+    randint = rng.integers if hasattr(rng, "integers") else rng.randint
+    interval_index = np.asarray(randint(0, len(PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGES), size=count))
     result = np.empty(count, dtype=np.float64)
     for index, (lower, upper) in enumerate(PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGES):
         mask = interval_index == index
