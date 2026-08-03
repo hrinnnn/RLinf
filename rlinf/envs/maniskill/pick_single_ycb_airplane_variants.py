@@ -18,12 +18,14 @@ PICK_SINGLE_YCB_AIRPLANE_OOD_ENV_ID = "RLinfPickSingleYCBAirplaneOOD-v1"
 PICK_SINGLE_YCB_AIRPLANE_MODEL_ID = "072-a_toy_airplane"
 PICK_SINGLE_YCB_AIRPLANE_TASK = "pick up the toy airplane and move it to the green goal"
 
-# These intervals intentionally leave a 50 degree yaw gap on each side.
-PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGE = (np.deg2rad(-20.0), np.deg2rad(20.0))
-PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGES = (
+# The airplane's straight top-down narrow-fuselage grasp is naturally aligned
+# around +/-90 degrees in the world frame.  That configuration is ID; the
+# near-zero yaw configuration requires a rotated grasp and is OOD.
+PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES = (
     (np.deg2rad(70.0), np.deg2rad(110.0)),
     (np.deg2rad(-110.0), np.deg2rad(-70.0)),
 )
+PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGE = (np.deg2rad(-20.0), np.deg2rad(20.0))
 
 # Both splits draw from these exact distributions.  The x-separated centres
 # guarantee a useful, reachable pick-to-goal displacement without making yaw
@@ -66,20 +68,20 @@ def sample_airplane_yaw(rng: Any, count: int, *, split: Literal["id", "ood"]) ->
     if count < 1:
         raise ValueError("count must be positive")
     if split == "id":
-        values = np.asarray(rng.uniform(*PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGE, size=count), dtype=np.float64).reshape(-1)
+        # ManiSkill's batched reset RNG wraps RandomState, whereas tests and
+        # standalone callers often use NumPy Generator.
+        randint = rng.integers if hasattr(rng, "integers") else rng.randint
+        interval_index = np.asarray(randint(0, len(PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES), size=count)).reshape(-1)[:count]
+        result = np.empty(count, dtype=np.float64)
+        for index, (lower, upper) in enumerate(PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES):
+            mask = interval_index == index
+            values = np.asarray(rng.uniform(lower, upper, size=int(mask.sum())), dtype=np.float64).reshape(-1)
+            result[mask] = values[: int(mask.sum())]
+        return result
+    if split == "ood":
+        values = np.asarray(rng.uniform(*PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGE, size=count), dtype=np.float64).reshape(-1)
         return values[:count]
-    if split != "ood":
-        raise ValueError(f"unknown split: {split}")
-    # ManiSkill's batched reset RNG wraps RandomState, whereas tests and
-    # standalone callers often use NumPy Generator.
-    randint = rng.integers if hasattr(rng, "integers") else rng.randint
-    interval_index = np.asarray(randint(0, len(PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGES), size=count)).reshape(-1)[:count]
-    result = np.empty(count, dtype=np.float64)
-    for index, (lower, upper) in enumerate(PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGES):
-        mask = interval_index == index
-        values = np.asarray(rng.uniform(lower, upper, size=int(mask.sum())), dtype=np.float64).reshape(-1)
-        result[mask] = values[: int(mask.sum())]
-    return result
+    raise ValueError(f"unknown split: {split}")
 
 
 def reset_metadata(env: Any, *, split: Literal["id", "ood"]) -> dict[str, Any]:
