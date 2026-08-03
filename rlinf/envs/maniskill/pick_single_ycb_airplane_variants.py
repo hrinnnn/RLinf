@@ -22,8 +22,8 @@ PICK_SINGLE_YCB_AIRPLANE_TASK = "pick up the toy airplane and move it to the gre
 # around +/-90 degrees in the world frame.  That configuration is ID; the
 # near-zero yaw configuration requires a rotated grasp and is OOD.
 PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES = (
-    (np.deg2rad(70.0), np.deg2rad(110.0)),
     (np.deg2rad(-110.0), np.deg2rad(-70.0)),
+    (np.deg2rad(70.0), np.deg2rad(110.0)),
 )
 PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGE = (np.deg2rad(-20.0), np.deg2rad(20.0))
 
