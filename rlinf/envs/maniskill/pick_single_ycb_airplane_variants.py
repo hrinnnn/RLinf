@@ -119,6 +119,7 @@ def register_controlled_pick_single_ycb_airplane_variants() -> None:
     from mani_skill.envs.tasks.tabletop.pick_single_ycb import PickSingleYCBEnv
     from mani_skill.utils.building import actors
     from mani_skill.utils.registration import register_env
+    from mani_skill.utils.scene_builder.table import TableSceneBuilder
     from mani_skill.utils.structs.actor import Actor
     from mani_skill.utils.structs.pose import Pose
 
@@ -128,9 +129,7 @@ def register_controlled_pick_single_ycb_airplane_variants() -> None:
         def _load_scene(self, options: dict) -> None:
             # This is PickSingleYCBEnv._load_scene with just one deliberate
             # change: its random model list becomes the immutable airplane.
-            self.table_scene = __import__("mani_skill.envs.scene_builder.table", fromlist=["TableSceneBuilder"]).TableSceneBuilder(
-                env=self, robot_init_qpos_noise=self.robot_init_qpos_noise
-            )
+            self.table_scene = TableSceneBuilder(env=self, robot_init_qpos_noise=self.robot_init_qpos_noise)
             self.table_scene.build()
             self._objs = []
             for index in range(self.num_envs):
