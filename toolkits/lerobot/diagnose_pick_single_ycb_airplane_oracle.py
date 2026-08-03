@@ -20,6 +20,7 @@ if str(RLINF_ROOT) not in sys.path:
 
 from rlinf.envs.maniskill.pick_single_ycb_airplane_variants import (
     PICK_SINGLE_YCB_AIRPLANE_ID_ENV_ID,
+    PICK_SINGLE_YCB_AIRPLANE_OOD_ENV_ID,
     register_controlled_pick_single_ycb_airplane_variants,
 )
 
@@ -121,6 +122,7 @@ def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray) -> dict
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=3)
+    parser.add_argument("--split", choices=("id", "ood"), default="id")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -129,7 +131,7 @@ def main() -> None:
 
     register_controlled_pick_single_ycb_airplane_variants()
     env = gym.make(
-        PICK_SINGLE_YCB_AIRPLANE_ID_ENV_ID,
+        PICK_SINGLE_YCB_AIRPLANE_ID_ENV_ID if args.split == "id" else PICK_SINGLE_YCB_AIRPLANE_OOD_ENV_ID,
         num_envs=1,
         obs_mode="rgb",
         control_mode="pd_joint_pos",
@@ -139,7 +141,10 @@ def main() -> None:
         max_episode_steps=80,
     )
     try:
-        rows = [try_candidate(env, seed=args.seed, name=name, local_point=point) for name, point in NECK_GRASP_CANDIDATES]
+        rows = [
+            {"split": args.split, **try_candidate(env, seed=args.seed, name=name, local_point=point)}
+            for name, point in NECK_GRASP_CANDIDATES
+        ]
     finally:
         env.close()
     args.output.parent.mkdir(parents=True, exist_ok=True)
