@@ -43,6 +43,17 @@ def _pose_result_ok(result) -> bool:
     return result != -1
 
 
+def _is_grasping(unwrapped) -> bool:
+    """Use the ManiSkill Panda grasp predicate across supported versions."""
+
+    predicate = getattr(unwrapped.agent, "is_grasping", None)
+    if predicate is None:
+        predicate = getattr(unwrapped.agent, "is_grasped", None)
+    if predicate is None:
+        raise AttributeError("Panda agent exposes neither is_grasping nor is_grasped")
+    return _scalar(predicate(unwrapped.obj))
+
+
 def _build_top_down_neck_pose(unwrapped, local_point: np.ndarray):
     """Build a top-down grasp centred on the narrow fuselage, not a wing."""
 
@@ -78,7 +89,7 @@ def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray) -> dict
         reached_grasp = reached_pregrasp and _pose_result_ok(planner.move_to_pose_with_screw(grasp_pose))
         if reached_grasp:
             planner.close_gripper(t=30)
-        grasped_after_close = reached_grasp and _scalar(unwrapped.agent.is_grasped(unwrapped.obj))
+        grasped_after_close = reached_grasp and _is_grasping(unwrapped)
         lifted = False
         final_z = float(unwrapped.obj.pose.p[0, 2].cpu())
         if grasped_after_close:
@@ -88,7 +99,7 @@ def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray) -> dict
             lifted_tcp = lifted_object * object_in_tcp.inv()
             lifted = _pose_result_ok(planner.move_to_pose_with_screw(lifted_tcp))
             final_z = float(unwrapped.obj.pose.p[0, 2].cpu())
-        still_grasped = _scalar(unwrapped.agent.is_grasped(unwrapped.obj)) if grasped_after_close else False
+        still_grasped = _is_grasping(unwrapped) if grasped_after_close else False
         return {
             "seed": seed,
             "candidate": name,
