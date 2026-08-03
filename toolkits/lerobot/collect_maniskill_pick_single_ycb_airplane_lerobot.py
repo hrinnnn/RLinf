@@ -151,7 +151,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-attempts", type=int, default=1024)
     parser.add_argument("--image-size", type=int, default=384)
     parser.add_argument("--control-freq", type=int, default=10)
-    parser.add_argument("--max-episode-steps", type=int, default=50)
+    # The validated top-down grasp, lift, and goal transport uses roughly
+    # 125 low-level joint commands.  Every split must share this horizon.
+    parser.add_argument("--max-episode-steps", type=int, default=200)
     parser.add_argument("--min-visual-change", type=float, default=1.0)
     parser.add_argument("--sim-backend", choices=("physx_cpu", "gpu"), default="physx_cpu")
     parser.add_argument("--save-videos", action=argparse.BooleanOptionalAction, default=True)
