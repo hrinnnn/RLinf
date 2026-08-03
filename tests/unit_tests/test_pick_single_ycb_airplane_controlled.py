@@ -12,6 +12,7 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 
 PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES = _MODULE.PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES
+PICK_SINGLE_YCB_AIRPLANE_LEGACY_ID_YAW_RANGES = _MODULE.PICK_SINGLE_YCB_AIRPLANE_LEGACY_ID_YAW_RANGES
 PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGE = _MODULE.PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGE
 sample_airplane_yaw = _MODULE.sample_airplane_yaw
 yaw_in_ranges = _MODULE.yaw_in_ranges
@@ -20,7 +21,8 @@ yaw_in_ranges = _MODULE.yaw_in_ranges
 def test_yaw_splits_are_disjoint():
     ood_lower, ood_upper = PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGE
     assert PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES[0][1] < ood_lower
-    assert ood_upper < PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES[1][0]
+    assert PICK_SINGLE_YCB_AIRPLANE_LEGACY_ID_YAW_RANGES[0][1] < ood_lower
+    assert ood_upper < PICK_SINGLE_YCB_AIRPLANE_LEGACY_ID_YAW_RANGES[1][0]
 
 
 def test_yaw_sampling_is_reproducible_and_respects_splits():
@@ -31,3 +33,8 @@ def test_yaw_sampling_is_reproducible_and_respects_splits():
     assert np.all(yaw_in_ranges(id_a, PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES))
     assert np.all((ood >= PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGE[0]) & (ood <= PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGE[1]))
     assert not np.any(yaw_in_ranges(ood, PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES))
+
+
+def test_legacy_mode_remains_available_for_historical_replay():
+    legacy = sample_airplane_yaw(np.random.default_rng(9), 64, split="legacy_id")
+    assert np.all(yaw_in_ranges(legacy, PICK_SINGLE_YCB_AIRPLANE_LEGACY_ID_YAW_RANGES))

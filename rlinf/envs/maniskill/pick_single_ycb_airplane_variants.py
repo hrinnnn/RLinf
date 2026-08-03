@@ -13,17 +13,25 @@ from typing import Any, Literal
 import numpy as np
 
 
-PICK_SINGLE_YCB_AIRPLANE_ID_ENV_ID = "RLinfPickSingleYCBAirplaneID-v1"
+PICK_SINGLE_YCB_AIRPLANE_LEGACY_ID_ENV_ID = "RLinfPickSingleYCBAirplaneID-v1"
+PICK_SINGLE_YCB_AIRPLANE_ID_ENV_ID = "RLinfPickSingleYCBAirplaneIDNo180-v1"
 PICK_SINGLE_YCB_AIRPLANE_OOD_ENV_ID = "RLinfPickSingleYCBAirplaneOOD-v1"
 PICK_SINGLE_YCB_AIRPLANE_MODEL_ID = "072-a_toy_airplane"
 PICK_SINGLE_YCB_AIRPLANE_TASK = "pick up the toy airplane and move it to the green goal"
 
-# The airplane's straight top-down narrow-fuselage grasp is naturally aligned
-# around +/-90 degrees in the world frame.  That configuration is ID; the
-# near-zero yaw configuration requires a rotated grasp and is OOD.
-PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES = (
+# The original collection mixed these two orientation modes.  Preserve it in
+# a separately named legacy environment so old videos and checkpoints remain
+# reproducible, but never use it for new experiments.
+PICK_SINGLE_YCB_AIRPLANE_LEGACY_ID_YAW_RANGES = (
     (np.deg2rad(-110.0), np.deg2rad(-70.0)),
     (np.deg2rad(70.0), np.deg2rad(110.0)),
+)
+
+# The revised ID task has one direct-grasp mode.  The source 98 demonstrations
+# observed [-109.94, -70.93] degrees; these slightly conservative semantic
+# limits describe the same no-180-degree orientation family for new resets.
+PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES = (
+    (np.deg2rad(-109.94), np.deg2rad(-70.93)),
 )
 PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGE = (np.deg2rad(-20.0), np.deg2rad(20.0))
 
@@ -54,7 +62,9 @@ def yaw_in_ranges(yaw: float | np.ndarray, ranges: tuple[tuple[float, float], ..
     return np.logical_or.reduce([(values >= lower) & (values <= upper) for lower, upper in ranges])
 
 
-def split_for_env_id(env_id: str) -> Literal["id", "ood"]:
+def split_for_env_id(env_id: str) -> Literal["legacy_id", "id", "ood"]:
+    if env_id == PICK_SINGLE_YCB_AIRPLANE_LEGACY_ID_ENV_ID:
+        return "legacy_id"
     if env_id == PICK_SINGLE_YCB_AIRPLANE_ID_ENV_ID:
         return "id"
     if env_id == PICK_SINGLE_YCB_AIRPLANE_OOD_ENV_ID:
@@ -62,29 +72,32 @@ def split_for_env_id(env_id: str) -> Literal["id", "ood"]:
     raise ValueError(f"Not a controlled airplane env id: {env_id}")
 
 
-def sample_airplane_yaw(rng: Any, count: int, *, split: Literal["id", "ood"]) -> np.ndarray:
+def sample_airplane_yaw(rng: Any, count: int, *, split: Literal["legacy_id", "id", "ood"]) -> np.ndarray:
     """Sample a yaw while keeping every non-yaw factor split-invariant."""
 
     if count < 1:
         raise ValueError("count must be positive")
-    if split == "id":
+    if split == "legacy_id":
         # ManiSkill's batched reset RNG wraps RandomState, whereas tests and
         # standalone callers often use NumPy Generator.
         randint = rng.integers if hasattr(rng, "integers") else rng.randint
         interval_index = np.asarray(randint(0, len(PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES), size=count)).reshape(-1)[:count]
         result = np.empty(count, dtype=np.float64)
-        for index, (lower, upper) in enumerate(PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES):
+        for index, (lower, upper) in enumerate(PICK_SINGLE_YCB_AIRPLANE_LEGACY_ID_YAW_RANGES):
             mask = interval_index == index
             values = np.asarray(rng.uniform(lower, upper, size=int(mask.sum())), dtype=np.float64).reshape(-1)
             result[mask] = values[: int(mask.sum())]
         return result
+    if split == "id":
+        lower, upper = PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGES[0]
+        return np.asarray(rng.uniform(lower, upper, size=count), dtype=np.float64).reshape(-1)[:count]
     if split == "ood":
         values = np.asarray(rng.uniform(*PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGE, size=count), dtype=np.float64).reshape(-1)
         return values[:count]
     raise ValueError(f"unknown split: {split}")
 
 
-def reset_metadata(env: Any, *, split: Literal["id", "ood"]) -> dict[str, Any]:
+def reset_metadata(env: Any, *, split: Literal["legacy_id", "id", "ood"]) -> dict[str, Any]:
     """Return JSON-safe immutable reset provenance after ``env.reset``."""
 
     base = env.unwrapped
@@ -117,7 +130,12 @@ def register_controlled_pick_single_ycb_airplane_variants() -> None:
         return
     import gymnasium as gym
 
-    if PICK_SINGLE_YCB_AIRPLANE_ID_ENV_ID in gym.registry and PICK_SINGLE_YCB_AIRPLANE_OOD_ENV_ID in gym.registry:
+    required_ids = (
+        PICK_SINGLE_YCB_AIRPLANE_LEGACY_ID_ENV_ID,
+        PICK_SINGLE_YCB_AIRPLANE_ID_ENV_ID,
+        PICK_SINGLE_YCB_AIRPLANE_OOD_ENV_ID,
+    )
+    if all(env_id in gym.registry for env_id in required_ids):
         _REGISTERED = True
         return
 
@@ -131,7 +149,7 @@ def register_controlled_pick_single_ycb_airplane_variants() -> None:
     from mani_skill.utils.structs.pose import Pose
 
     class _ControlledAirplaneMixin:
-        rlinf_split: Literal["id", "ood"]
+        rlinf_split: Literal["legacy_id", "id", "ood"]
 
         def _load_scene(self, options: dict) -> None:
             # This is PickSingleYCBEnv._load_scene with just one deliberate
@@ -188,6 +206,10 @@ def register_controlled_pick_single_ycb_airplane_variants() -> None:
                 qpos[:-2] += self._episode_rng.normal(0, self.robot_init_qpos_noise, len(qpos) - 2)
                 self.agent.reset(qpos)
                 self.agent.robot.set_root_pose(sapien.Pose([-0.615, 0, 0]))
+
+    @register_env(PICK_SINGLE_YCB_AIRPLANE_LEGACY_ID_ENV_ID, max_episode_steps=50, asset_download_ids=["ycb"])
+    class ControlledPickSingleYCBAirplaneLegacyIDEnv(_ControlledAirplaneMixin, PickSingleYCBEnv):
+        rlinf_split = "legacy_id"
 
     @register_env(PICK_SINGLE_YCB_AIRPLANE_ID_ENV_ID, max_episode_steps=50, asset_download_ids=["ycb"])
     class ControlledPickSingleYCBAirplaneIDEnv(_ControlledAirplaneMixin, PickSingleYCBEnv):
