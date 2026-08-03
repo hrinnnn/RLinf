@@ -46,6 +46,7 @@ from toolkits.lerobot.collect_maniskill_peg_lerobot_joint import (
     _write_episode_video,
     validate_visual_motion,
 )
+from toolkits.lerobot.diagnose_pick_single_ycb_airplane_oracle import run_oracle_with_fallback
 
 LOG = logging.getLogger("collect_maniskill_pick_single_ycb_airplane_lerobot")
 
@@ -86,31 +87,11 @@ def _build_env(args: argparse.Namespace, *, control_mode: str):
     )
 
 
-def _solve(env: Any, *, seed: int) -> bool:
-    """Use ManiSkill's stock Panda planning primitives on the airplane actor."""
+def _solve(env: Any, *, seed: int) -> dict[str, Any] | None:
+    """Run the validated top-down narrow-fuselage oracle to true task success."""
 
-    import sapien
-    from mani_skill.examples.motionplanning.base_motionplanner.utils import compute_grasp_info_by_obb, get_actor_obb
-    from mani_skill.examples.motionplanning.panda.motionplanner import PandaArmMotionPlanningSolver
-
-    env.reset(seed=seed)
-    planner = PandaArmMotionPlanningSolver(env, debug=False, vis=False, base_pose=env.unwrapped.agent.robot.pose,
-                                            visualize_target_grasp_pose=False, print_env_info=False)
-    unwrapped = env.unwrapped
-    try:
-        obb = get_actor_obb(unwrapped.obj)
-        approaching = np.array([0.0, 0.0, -1.0])
-        target_closing = unwrapped.agent.tcp.pose.to_transformation_matrix()[0, :3, 1].cpu().numpy()
-        grasp_info = compute_grasp_info_by_obb(obb, approaching=approaching, target_closing=target_closing, depth=0.025)
-        grasp_pose = unwrapped.agent.build_grasp_pose(approaching, grasp_info["closing"], unwrapped.obj.pose.sp.p)
-        if not planner.move_to_pose_with_screw(grasp_pose * sapien.Pose([0, 0, -0.05])):
-            return False
-        if not planner.move_to_pose_with_screw(grasp_pose):
-            return False
-        planner.close_gripper()
-        return bool(planner.move_to_pose_with_screw(sapien.Pose(unwrapped.goal_site.pose.sp.p, grasp_pose.q)))
-    finally:
-        planner.close()
+    result = run_oracle_with_fallback(env, seed=seed, close_steps=45, complete_task=True)
+    return result if bool(result["accepted"]) else None
 
 
 def _run_reference(env: Any, seed: int) -> tuple[list[Any], list[Any], dict[str, Any]] | None:
@@ -133,8 +114,14 @@ def _run_reference(env: Any, seed: int) -> tuple[list[Any], list[Any], dict[str,
 
     env.reset, env.step = reset_hook, step_hook  # type: ignore[method-assign]
     try:
-        if not _solve(env, seed=seed) or len(records) != len(actions) + 1 or not actions:
+        oracle = _solve(env, seed=seed)
+        if oracle is None or len(records) != len(actions) + 1 or not actions:
             return None
+        metadata["oracle"] = {
+            "type": "top_down_airplane_narrow_fuselage",
+            "selected_candidate": oracle["selected_candidate"],
+            "attempt_count": len(oracle["attempts"]),
+        }
         return records, actions, dict(metadata)
     finally:
         env.reset, env.step = original_reset, original_step  # type: ignore[method-assign]
@@ -204,7 +191,7 @@ def main() -> None:
                     image_writer_threads=4, image_writer_processes=4)
             for frame in frames: dataset.add_frame(frame)
             dataset.save_episode()
-            rows.append({"episode_index": saved, "seed": seed, "source": "official_panda_motion_planning_oracle", **metadata,
+            rows.append({"episode_index": saved, "seed": seed, "source": "official_panda_motion_planning_top_down_airplane_oracle", **metadata,
                          "actions": len(actions), "frames": len(records)})
             if args.save_videos:
                 write_episode_video_durably(frames, video_dir=_video_output_dir(args.repo_id, ""), episode_index=saved, seed=seed, fps=args.control_freq)
