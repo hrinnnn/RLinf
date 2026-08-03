@@ -87,8 +87,10 @@ def _build_top_down_neck_pose(unwrapped, local_point: np.ndarray):
     return unwrapped.agent.build_grasp_pose(approach, closing, world_point)
 
 
-def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray, close_steps: int) -> dict[str, object]:
-    """Run contact, close, and lift. A contact-only grasp is explicitly rejected."""
+def try_candidate(
+    env, *, seed: int, name: str, local_point: np.ndarray, close_steps: int, complete_task: bool
+) -> dict[str, object]:
+    """Run contact, lift, and optionally transport to the official goal."""
 
     import sapien
     from mani_skill.examples.motionplanning.panda.motionplanner import PandaArmMotionPlanningSolver
@@ -112,6 +114,9 @@ def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray, close_s
             planner.close_gripper(t=close_steps)
         grasped_after_close = reached_grasp and _is_grasping(unwrapped)
         lifted = False
+        moved_to_goal = False
+        success = False
+        goal_distance = float("inf")
         final_z = float(unwrapped.obj.pose.p[0, 2].cpu())
         if grasped_after_close:
             object_in_tcp = unwrapped.agent.tcp.pose.sp.inv() * unwrapped.obj.pose.sp
@@ -121,6 +126,18 @@ def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray, close_s
             lifted = _move_with_planning_fallback(planner, lifted_tcp)
             final_z = float(unwrapped.obj.pose.p[0, 2].cpu())
         still_grasped = _is_grasping(unwrapped) if grasped_after_close else False
+        accepted_lift = bool(lifted and still_grasped and final_z - initial_z >= 0.06)
+        if complete_task and accepted_lift:
+            # Keep the grasp transform that physics produced, rather than
+            # assuming the object remains perfectly at the nominal TCP pose.
+            object_in_tcp = unwrapped.agent.tcp.pose.sp.inv() * unwrapped.obj.pose.sp
+            target_object = sapien.Pose(unwrapped.goal_site.pose.sp.p, unwrapped.obj.pose.sp.q)
+            moved_to_goal = _move_with_planning_fallback(planner, target_object * object_in_tcp.inv())
+            if moved_to_goal:
+                planner.close_gripper(t=20)
+            evaluation = unwrapped.evaluate()
+            success = _scalar(evaluation["success"])
+            goal_distance = float(np.linalg.norm(unwrapped.goal_site.pose.p[0].cpu().numpy() - unwrapped.obj.pose.p[0].cpu().numpy()))
         return {
             "seed": seed,
             "candidate": name,
@@ -134,7 +151,11 @@ def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray, close_s
             "initial_z": initial_z,
             "final_z": final_z,
             "lift_delta_z": final_z - initial_z,
-            "accepted": bool(lifted and still_grasped and final_z - initial_z >= 0.06),
+            "accepted_lift": accepted_lift,
+            "moved_to_goal": moved_to_goal,
+            "goal_distance": goal_distance,
+            "success": success,
+            "accepted": success if complete_task else accepted_lift,
         }
     finally:
         planner.close()
@@ -147,6 +168,7 @@ def main() -> None:
     parser.add_argument("--profile", choices=("baseline", "refinement"), default="baseline")
     parser.add_argument("--candidate-name", default=None)
     parser.add_argument("--close-steps", type=int, default=45)
+    parser.add_argument("--complete-task", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -171,7 +193,17 @@ def main() -> None:
             if not candidates:
                 raise ValueError(f"candidate {args.candidate_name!r} is not part of profile {args.profile!r}")
         rows = [
-            {"split": args.split, **try_candidate(env, seed=args.seed, name=name, local_point=point, close_steps=args.close_steps)}
+            {
+                "split": args.split,
+                **try_candidate(
+                    env,
+                    seed=args.seed,
+                    name=name,
+                    local_point=point,
+                    close_steps=args.close_steps,
+                    complete_task=args.complete_task,
+                ),
+            }
             for name, point in candidates
         ]
     finally:
