@@ -34,6 +34,18 @@ NECK_GRASP_CANDIDATES = (
     ("neck_y_minus_060", np.array([0.0, -0.060, 0.0], dtype=np.float64)),
 )
 
+# A local refinement around the first viable neck point.  The small vertical
+# offsets change where the fingers meet the fuselage; they do not move toward
+# either wing.
+NECK_REFINEMENT_CANDIDATES = (
+    ("neck_y_minus_046_z_minus_010", np.array([0.0, -0.046, -0.010], dtype=np.float64)),
+    ("neck_y_minus_046_z_zero", np.array([0.0, -0.046, 0.0], dtype=np.float64)),
+    ("neck_y_minus_050_z_minus_010", np.array([0.0, -0.050, -0.010], dtype=np.float64)),
+    ("neck_y_minus_050_z_zero", np.array([0.0, -0.050, 0.0], dtype=np.float64)),
+    ("neck_y_minus_054_z_minus_010", np.array([0.0, -0.054, -0.010], dtype=np.float64)),
+    ("neck_y_minus_054_z_zero", np.array([0.0, -0.054, 0.0], dtype=np.float64)),
+)
+
 
 def _scalar(value) -> bool:
     array = np.asarray(value)
@@ -67,7 +79,7 @@ def _build_top_down_neck_pose(unwrapped, local_point: np.ndarray):
     return unwrapped.agent.build_grasp_pose(approach, closing, world_point)
 
 
-def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray) -> dict[str, object]:
+def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray, close_steps: int) -> dict[str, object]:
     """Run contact, close, and lift. A contact-only grasp is explicitly rejected."""
 
     import sapien
@@ -89,7 +101,7 @@ def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray) -> dict
         reached_pregrasp = _pose_result_ok(planner.move_to_pose_with_screw(grasp_pose * sapien.Pose([0.0, 0.0, -0.065])))
         reached_grasp = reached_pregrasp and _pose_result_ok(planner.move_to_pose_with_screw(grasp_pose))
         if reached_grasp:
-            planner.close_gripper(t=30)
+            planner.close_gripper(t=close_steps)
         grasped_after_close = reached_grasp and _is_grasping(unwrapped)
         lifted = False
         final_z = float(unwrapped.obj.pose.p[0, 2].cpu())
@@ -105,6 +117,7 @@ def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray) -> dict
             "seed": seed,
             "candidate": name,
             "local_point": local_point.tolist(),
+            "close_steps": close_steps,
             "reached_pregrasp": reached_pregrasp,
             "reached_grasp": reached_grasp,
             "grasped_after_close": grasped_after_close,
@@ -123,6 +136,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=3)
     parser.add_argument("--split", choices=("id", "ood"), default="id")
+    parser.add_argument("--profile", choices=("baseline", "refinement"), default="baseline")
+    parser.add_argument("--close-steps", type=int, default=45)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -141,9 +156,10 @@ def main() -> None:
         max_episode_steps=80,
     )
     try:
+        candidates = NECK_GRASP_CANDIDATES if args.profile == "baseline" else NECK_REFINEMENT_CANDIDATES
         rows = [
-            {"split": args.split, **try_candidate(env, seed=args.seed, name=name, local_point=point)}
-            for name, point in NECK_GRASP_CANDIDATES
+            {"split": args.split, **try_candidate(env, seed=args.seed, name=name, local_point=point, close_steps=args.close_steps)}
+            for name, point in candidates
         ]
     finally:
         env.close()
