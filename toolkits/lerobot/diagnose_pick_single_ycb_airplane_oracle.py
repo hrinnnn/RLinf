@@ -56,6 +56,14 @@ def _pose_result_ok(result) -> bool:
     return result != -1
 
 
+def _move_with_planning_fallback(planner, pose) -> bool:
+    """Prefer a short Cartesian screw path, then use official RRTConnect."""
+
+    if _pose_result_ok(planner.move_to_pose_with_screw(pose)):
+        return True
+    return _pose_result_ok(planner.move_to_pose_with_RRTConnect(pose))
+
+
 def _is_grasping(unwrapped) -> bool:
     """Use the ManiSkill Panda grasp predicate across supported versions."""
 
@@ -98,8 +106,8 @@ def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray, close_s
     try:
         grasp_pose = _build_top_down_neck_pose(unwrapped, local_point)
         initial_z = float(unwrapped.obj.pose.p[0, 2].cpu())
-        reached_pregrasp = _pose_result_ok(planner.move_to_pose_with_screw(grasp_pose * sapien.Pose([0.0, 0.0, -0.065])))
-        reached_grasp = reached_pregrasp and _pose_result_ok(planner.move_to_pose_with_screw(grasp_pose))
+        reached_pregrasp = _move_with_planning_fallback(planner, grasp_pose * sapien.Pose([0.0, 0.0, -0.065]))
+        reached_grasp = reached_pregrasp and _move_with_planning_fallback(planner, grasp_pose)
         if reached_grasp:
             planner.close_gripper(t=close_steps)
         grasped_after_close = reached_grasp and _is_grasping(unwrapped)
@@ -110,7 +118,7 @@ def try_candidate(env, *, seed: int, name: str, local_point: np.ndarray, close_s
             held_object = unwrapped.obj.pose.sp
             lifted_object = sapien.Pose(held_object.p + np.array([0.0, 0.0, 0.12]), held_object.q)
             lifted_tcp = lifted_object * object_in_tcp.inv()
-            lifted = _pose_result_ok(planner.move_to_pose_with_screw(lifted_tcp))
+            lifted = _move_with_planning_fallback(planner, lifted_tcp)
             final_z = float(unwrapped.obj.pose.p[0, 2].cpu())
         still_grasped = _is_grasping(unwrapped) if grasped_after_close else False
         return {
@@ -137,6 +145,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=3)
     parser.add_argument("--split", choices=("id", "ood"), default="id")
     parser.add_argument("--profile", choices=("baseline", "refinement"), default="baseline")
+    parser.add_argument("--candidate-name", default=None)
     parser.add_argument("--close-steps", type=int, default=45)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -157,6 +166,10 @@ def main() -> None:
     )
     try:
         candidates = NECK_GRASP_CANDIDATES if args.profile == "baseline" else NECK_REFINEMENT_CANDIDATES
+        if args.candidate_name is not None:
+            candidates = tuple(candidate for candidate in candidates if candidate[0] == args.candidate_name)
+            if not candidates:
+                raise ValueError(f"candidate {args.candidate_name!r} is not part of profile {args.profile!r}")
         rows = [
             {"split": args.split, **try_candidate(env, seed=args.seed, name=name, local_point=point, close_steps=args.close_steps)}
             for name, point in candidates
