@@ -46,6 +46,15 @@ NECK_REFINEMENT_CANDIDATES = (
     ("neck_y_minus_054_z_zero", np.array([0.0, -0.054, 0.0], dtype=np.float64)),
 )
 
+# Fixed order for the task oracle.  Every option remains in the same narrow
+# fuselage region.  A failed attempt is reset to the identical seeded state,
+# so it never contaminates the accepted expert trajectory.
+ORACLE_NECK_CANDIDATES = (
+    NECK_REFINEMENT_CANDIDATES[4],
+    NECK_REFINEMENT_CANDIDATES[0],
+    NECK_REFINEMENT_CANDIDATES[2],
+)
+
 
 def _scalar(value) -> bool:
     array = np.asarray(value)
@@ -161,6 +170,30 @@ def try_candidate(
         planner.close()
 
 
+def run_oracle_with_fallback(env, *, seed: int, close_steps: int, complete_task: bool) -> dict[str, object]:
+    """Retry only deterministic narrow-neck poses from the identical reset."""
+
+    attempts: list[dict[str, object]] = []
+    for name, local_point in ORACLE_NECK_CANDIDATES:
+        attempt = try_candidate(
+            env,
+            seed=seed,
+            name=name,
+            local_point=local_point,
+            close_steps=close_steps,
+            complete_task=complete_task,
+        )
+        attempts.append(attempt)
+        if bool(attempt["accepted"]):
+            return {
+                "seed": seed,
+                "accepted": True,
+                "selected_candidate": name,
+                "attempts": attempts,
+            }
+    return {"seed": seed, "accepted": False, "selected_candidate": None, "attempts": attempts}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=3)
@@ -169,6 +202,7 @@ def main() -> None:
     parser.add_argument("--candidate-name", default=None)
     parser.add_argument("--close-steps", type=int, default=45)
     parser.add_argument("--complete-task", action="store_true")
+    parser.add_argument("--oracle-fallback", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -187,25 +221,30 @@ def main() -> None:
         max_episode_steps=80,
     )
     try:
-        candidates = NECK_GRASP_CANDIDATES if args.profile == "baseline" else NECK_REFINEMENT_CANDIDATES
-        if args.candidate_name is not None:
-            candidates = tuple(candidate for candidate in candidates if candidate[0] == args.candidate_name)
-            if not candidates:
-                raise ValueError(f"candidate {args.candidate_name!r} is not part of profile {args.profile!r}")
-        rows = [
-            {
-                "split": args.split,
-                **try_candidate(
-                    env,
-                    seed=args.seed,
-                    name=name,
-                    local_point=point,
-                    close_steps=args.close_steps,
-                    complete_task=args.complete_task,
-                ),
-            }
-            for name, point in candidates
-        ]
+        if args.oracle_fallback:
+            rows = [{"split": args.split, **run_oracle_with_fallback(
+                env, seed=args.seed, close_steps=args.close_steps, complete_task=args.complete_task
+            )}]
+        else:
+            candidates = NECK_GRASP_CANDIDATES if args.profile == "baseline" else NECK_REFINEMENT_CANDIDATES
+            if args.candidate_name is not None:
+                candidates = tuple(candidate for candidate in candidates if candidate[0] == args.candidate_name)
+                if not candidates:
+                    raise ValueError(f"candidate {args.candidate_name!r} is not part of profile {args.profile!r}")
+            rows = [
+                {
+                    "split": args.split,
+                    **try_candidate(
+                        env,
+                        seed=args.seed,
+                        name=name,
+                        local_point=point,
+                        close_steps=args.close_steps,
+                        complete_task=args.complete_task,
+                    ),
+                }
+                for name, point in candidates
+            ]
     finally:
         env.close()
     args.output.parent.mkdir(parents=True, exist_ok=True)
