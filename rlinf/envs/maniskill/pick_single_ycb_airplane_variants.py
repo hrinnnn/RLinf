@@ -66,17 +66,19 @@ def sample_airplane_yaw(rng: Any, count: int, *, split: Literal["id", "ood"]) ->
     if count < 1:
         raise ValueError("count must be positive")
     if split == "id":
-        return np.asarray(rng.uniform(*PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGE, size=count), dtype=np.float64)
+        values = np.asarray(rng.uniform(*PICK_SINGLE_YCB_AIRPLANE_ID_YAW_RANGE, size=count), dtype=np.float64).reshape(-1)
+        return values[:count]
     if split != "ood":
         raise ValueError(f"unknown split: {split}")
     # ManiSkill's batched reset RNG wraps RandomState, whereas tests and
     # standalone callers often use NumPy Generator.
     randint = rng.integers if hasattr(rng, "integers") else rng.randint
-    interval_index = np.asarray(randint(0, len(PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGES), size=count))
+    interval_index = np.asarray(randint(0, len(PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGES), size=count)).reshape(-1)[:count]
     result = np.empty(count, dtype=np.float64)
     for index, (lower, upper) in enumerate(PICK_SINGLE_YCB_AIRPLANE_OOD_YAW_RANGES):
         mask = interval_index == index
-        result[mask] = rng.uniform(lower, upper, size=int(mask.sum()))
+        values = np.asarray(rng.uniform(lower, upper, size=int(mask.sum())), dtype=np.float64).reshape(-1)
+        result[mask] = values[: int(mask.sum())]
     return result
 
 
