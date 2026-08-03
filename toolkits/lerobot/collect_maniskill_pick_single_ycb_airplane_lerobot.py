@@ -202,8 +202,11 @@ def main() -> None:
         if dataset is not None and getattr(dataset, "image_writer", None) is not None: dataset.image_writer.wait_until_done()
         solver_env.close(); replay_env.close()
     if saved != args.num_episodes: raise RuntimeError(f"collected {saved}/{args.num_episodes} successful replays after {attempts} attempts")
-    (args.output_dir / "episodes.jsonl").write_text("".join(json.dumps(row) + "\\n" for row in rows), encoding="utf-8")
-    (args.output_dir / "summary.json").write_text(json.dumps({"dataset": str(dataset_path), "split": args.split, "episodes": saved, "attempts": attempts}, indent=2) + "\\n")
+    (args.output_dir / "episodes.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    (args.output_dir / "summary.json").write_text(
+        json.dumps({"dataset": str(dataset_path), "split": args.split, "episodes": saved, "attempts": attempts}, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__": main()
