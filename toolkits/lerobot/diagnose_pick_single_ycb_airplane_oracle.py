@@ -111,6 +111,7 @@ def try_candidate(
     close_steps: int,
     complete_task: bool,
     reset_before_attempt: bool = True,
+    force_planner_pd_joint_pos: bool = False,
 ) -> dict[str, object]:
     """Run contact, lift, and optionally transport to the official goal."""
 
@@ -128,6 +129,11 @@ def try_candidate(
         visualize_target_grasp_pose=False,
         print_env_info=False,
     )
+    if force_planner_pd_joint_pos:
+        # A caller may adapt each absolute joint target into another control
+        # mode inside env.step.  Keep planner outputs in the standard 8-D
+        # [joint_target, gripper] form in that case.
+        planner.control_mode = "pd_joint_pos"
     try:
         grasp_pose = _build_top_down_neck_pose(unwrapped, local_point)
         initial_z = float(unwrapped.obj.pose.p[0, 2].cpu())
