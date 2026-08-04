@@ -97,14 +97,22 @@ def _build_top_down_neck_pose(unwrapped, local_point: np.ndarray):
 
 
 def try_candidate(
-    env, *, seed: int, name: str, local_point: np.ndarray, close_steps: int, complete_task: bool
+    env,
+    *,
+    seed: int,
+    name: str,
+    local_point: np.ndarray,
+    close_steps: int,
+    complete_task: bool,
+    reset_before_attempt: bool = True,
 ) -> dict[str, object]:
     """Run contact, lift, and optionally transport to the official goal."""
 
     import sapien
     from mani_skill.examples.motionplanning.panda.motionplanner import PandaArmMotionPlanningSolver
 
-    env.reset(seed=seed)
+    if reset_before_attempt:
+        env.reset(seed=seed)
     unwrapped = env.unwrapped
     planner = PandaArmMotionPlanningSolver(
         env,
