@@ -93,6 +93,12 @@ def _build_top_down_neck_pose(unwrapped, local_point: np.ndarray):
     world_point = object_matrix[:3, :3] @ local_point + object_matrix[:3, 3]
     approach = np.array([0.0, 0.0, -1.0])
     closing = object_matrix[:3, :3] @ np.array([1.0, 0.0, 0.0])
+    # A policy may leave the airplane tilted before asking for help.  Preserve
+    # a top-down approach while projecting the fuselage-relative closing axis
+    # into its orthogonal plane, as required by Panda.build_grasp_pose.
+    closing = closing - approach * float(approach @ closing)
+    norm = float(np.linalg.norm(closing))
+    closing = closing / norm if norm > 1e-6 else np.array([1.0, 0.0, 0.0])
     return unwrapped.agent.build_grasp_pose(approach, closing, world_point)
 
 
