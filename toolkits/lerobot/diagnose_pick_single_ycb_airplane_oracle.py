@@ -44,12 +44,23 @@ NECK_REFINEMENT_CANDIDATES = (
     ("neck_y_minus_050_z_zero", np.array([0.0, -0.050, 0.0], dtype=np.float64)),
     ("neck_y_minus_054_z_minus_010", np.array([0.0, -0.054, -0.010], dtype=np.float64)),
     ("neck_y_minus_054_z_zero", np.array([0.0, -0.054, 0.0], dtype=np.float64)),
+    ("neck_y_minus_046_z_zero_flip", np.array([0.0, -0.046, 0.0], dtype=np.float64)),
+    ("neck_y_minus_042_z_zero", np.array([0.0, -0.042, 0.0], dtype=np.float64)),
+    ("neck_y_minus_042_z_zero_flip", np.array([0.0, -0.042, 0.0], dtype=np.float64)),
+    ("neck_y_minus_038_z_zero", np.array([0.0, -0.038, 0.0], dtype=np.float64)),
+    ("neck_y_minus_038_z_zero_flip", np.array([0.0, -0.038, 0.0], dtype=np.float64)),
 )
 
 # Fixed order for the task oracle.  Every option remains in the same narrow
 # fuselage region.  A failed attempt is reset to the identical seeded state,
 # so it never contaminates the accepted expert trajectory.
 ORACLE_NECK_CANDIDATES = (
+    NECK_REFINEMENT_CANDIDATES[1],
+    NECK_REFINEMENT_CANDIDATES[6],
+    NECK_REFINEMENT_CANDIDATES[7],
+    NECK_REFINEMENT_CANDIDATES[8],
+    NECK_REFINEMENT_CANDIDATES[9],
+    NECK_REFINEMENT_CANDIDATES[10],
     NECK_REFINEMENT_CANDIDATES[4],
     NECK_REFINEMENT_CANDIDATES[0],
     NECK_REFINEMENT_CANDIDATES[2],
@@ -84,7 +95,7 @@ def _is_grasping(unwrapped) -> bool:
     return _scalar(predicate(unwrapped.obj))
 
 
-def _build_top_down_neck_pose(unwrapped, local_point: np.ndarray):
+def _build_top_down_neck_pose(unwrapped, local_point: np.ndarray, *, closing_sign: float = 1.0):
     """Build a top-down grasp centred on the narrow fuselage, not a wing."""
 
     import sapien
@@ -92,7 +103,7 @@ def _build_top_down_neck_pose(unwrapped, local_point: np.ndarray):
     object_matrix = unwrapped.obj.pose.to_transformation_matrix()[0].cpu().numpy()
     world_point = object_matrix[:3, :3] @ local_point + object_matrix[:3, 3]
     approach = np.array([0.0, 0.0, -1.0])
-    closing = object_matrix[:3, :3] @ np.array([1.0, 0.0, 0.0])
+    closing = object_matrix[:3, :3] @ np.array([closing_sign, 0.0, 0.0])
     # A policy may leave the airplane tilted before asking for help.  Preserve
     # a top-down approach while projecting the fuselage-relative closing axis
     # into its orthogonal plane, as required by Panda.build_grasp_pose.
@@ -112,6 +123,7 @@ def try_candidate(
     complete_task: bool,
     reset_before_attempt: bool = True,
     force_planner_pd_joint_pos: bool = False,
+    closing_sign: float = 1.0,
 ) -> dict[str, object]:
     """Run contact, lift, and optionally transport to the official goal."""
 
@@ -135,7 +147,7 @@ def try_candidate(
         # [joint_target, gripper] form in that case.
         planner.control_mode = "pd_joint_pos"
     try:
-        grasp_pose = _build_top_down_neck_pose(unwrapped, local_point)
+        grasp_pose = _build_top_down_neck_pose(unwrapped, local_point, closing_sign=closing_sign)
         initial_z = float(unwrapped.obj.pose.p[0, 2].cpu())
         reached_pregrasp = _move_with_planning_fallback(planner, grasp_pose * sapien.Pose([0.0, 0.0, -0.065]))
         reached_grasp = reached_pregrasp and _move_with_planning_fallback(planner, grasp_pose)
@@ -202,6 +214,7 @@ def run_oracle_with_fallback(env, *, seed: int, close_steps: int, complete_task:
             local_point=local_point,
             close_steps=close_steps,
             complete_task=complete_task,
+            closing_sign=-1.0 if name.endswith("_flip") else 1.0,
         )
         attempts.append(attempt)
         if bool(attempt["accepted"]):
@@ -261,6 +274,7 @@ def main() -> None:
                         local_point=point,
                         close_steps=args.close_steps,
                         complete_task=args.complete_task,
+                        closing_sign=-1.0 if name.endswith("_flip") else 1.0,
                     ),
                 }
                 for name, point in candidates
