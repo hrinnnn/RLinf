@@ -38,6 +38,16 @@ NECK_GRASP_CANDIDATES = (
 # offsets change where the fingers meet the fuselage; they do not move toward
 # either wing.
 NECK_REFINEMENT_CANDIDATES = (
+    # Collision-mesh component 7 is the narrow fuselage neck.  Its local
+    # bounds are approximately x=[-0.046, 0.019], y=[-0.077, -0.014],
+    # z=[0.007, 0.053], so the grasp centre must sit above and slightly left
+    # of the object origin.  The older x=0,z=0 candidates touched the lower
+    # edge and could report a transient grasp before slipping during lift.
+    ("neck_center_x_minus_014_y_minus_046_z_plus_030", np.array([-0.014, -0.046, 0.030], dtype=np.float64)),
+    ("neck_center_x_minus_014_y_minus_050_z_plus_030", np.array([-0.014, -0.050, 0.030], dtype=np.float64)),
+    ("neck_center_x_minus_014_y_minus_042_z_plus_030", np.array([-0.014, -0.042, 0.030], dtype=np.float64)),
+    ("neck_center_x_minus_020_y_minus_046_z_plus_026", np.array([-0.020, -0.046, 0.026], dtype=np.float64)),
+    ("neck_center_x_minus_008_y_minus_046_z_plus_026", np.array([-0.008, -0.046, 0.026], dtype=np.float64)),
     ("neck_y_minus_046_z_minus_010", np.array([0.0, -0.046, -0.010], dtype=np.float64)),
     ("neck_y_minus_046_z_zero", np.array([0.0, -0.046, 0.0], dtype=np.float64)),
     ("neck_y_minus_050_z_minus_010", np.array([0.0, -0.050, -0.010], dtype=np.float64)),
@@ -55,15 +65,16 @@ NECK_REFINEMENT_CANDIDATES = (
 # fuselage region.  A failed attempt is reset to the identical seeded state,
 # so it never contaminates the accepted expert trajectory.
 ORACLE_NECK_CANDIDATES = (
-    NECK_REFINEMENT_CANDIDATES[1],
+    *NECK_REFINEMENT_CANDIDATES[:5],
     NECK_REFINEMENT_CANDIDATES[6],
-    NECK_REFINEMENT_CANDIDATES[7],
-    NECK_REFINEMENT_CANDIDATES[8],
+    NECK_REFINEMENT_CANDIDATES[11],
+    NECK_REFINEMENT_CANDIDATES[12],
+    NECK_REFINEMENT_CANDIDATES[13],
+    NECK_REFINEMENT_CANDIDATES[14],
+    NECK_REFINEMENT_CANDIDATES[15],
     NECK_REFINEMENT_CANDIDATES[9],
-    NECK_REFINEMENT_CANDIDATES[10],
-    NECK_REFINEMENT_CANDIDATES[4],
-    NECK_REFINEMENT_CANDIDATES[0],
-    NECK_REFINEMENT_CANDIDATES[2],
+    NECK_REFINEMENT_CANDIDATES[5],
+    NECK_REFINEMENT_CANDIDATES[7],
 )
 
 
