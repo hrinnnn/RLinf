@@ -371,6 +371,205 @@ def pca_residual_score(features: torch.Tensor, statistics: PCAResidualStatistics
     return pca_residual_token_scores(features, statistics).amax(dim=-1)
 
 
+@dataclass(frozen=True)
+class TokenwisePCAResidualStatistics:
+    """Independent PCA subspaces and residual scales for prefix tokens.
+
+    Unlike :class:`PCAResidualStatistics`, this payload explicitly carries the
+    ID residual scale for every token position and an eligibility mask.  It is
+    intended for token-wise TopK aggregation, where an invalid/padded position
+    must never contribute a score.
+    """
+
+    mean: torch.Tensor
+    principal_components: torch.Tensor
+    residual_mean: torch.Tensor
+    residual_std: torch.Tensor
+    eligible_tokens: torch.Tensor
+    observation_counts: torch.Tensor
+    principal_dim: int
+    min_observations: int
+
+    def validate(self) -> None:
+        if self.mean.ndim != 2 or self.principal_components.ndim != 3:
+            raise ValueError("token-wise PCA mean/components have invalid rank")
+        tokens, hidden_dim = self.mean.shape
+        if self.principal_components.shape != (tokens, hidden_dim, self.principal_dim):
+            raise ValueError("token-wise PCA principal component shape is invalid")
+        if self.residual_mean.shape != (tokens,) or self.residual_std.shape != (tokens,):
+            raise ValueError("token-wise PCA residual statistics have invalid shape")
+        if self.eligible_tokens.shape != (tokens,) or self.eligible_tokens.dtype != torch.bool:
+            raise ValueError("token-wise PCA eligibility mask has invalid shape or dtype")
+        if self.observation_counts.shape != (tokens,):
+            raise ValueError("token-wise PCA observation counts have invalid shape")
+        if not 0 < self.principal_dim <= hidden_dim:
+            raise ValueError("token-wise PCA principal_dim is invalid")
+        if self.min_observations < self.principal_dim + 1:
+            raise ValueError("token-wise PCA min_observations must exceed principal_dim")
+        if torch.any(self.observation_counts < 0):
+            raise ValueError("token-wise PCA observation counts must be non-negative")
+        if torch.any(self.eligible_tokens & (self.observation_counts < self.min_observations)):
+            raise ValueError("eligible token has too few ID observations")
+        if not all(torch.isfinite(value).all() for value in (self.mean, self.principal_components, self.residual_mean, self.residual_std)):
+            raise ValueError("token-wise PCA statistics must be finite")
+        if torch.any(self.residual_std < 0):
+            raise ValueError("token-wise PCA residual std must be non-negative")
+
+    def state_dict(self) -> dict[str, object]:
+        self.validate()
+        return {
+            "mean": self.mean.cpu(),
+            "principal_components": self.principal_components.cpu(),
+            "residual_mean": self.residual_mean.cpu(),
+            "residual_std": self.residual_std.cpu(),
+            "eligible_tokens": self.eligible_tokens.cpu(),
+            "observation_counts": self.observation_counts.cpu(),
+            "principal_dim": self.principal_dim,
+            "min_observations": self.min_observations,
+        }
+
+    @classmethod
+    def from_state_dict(cls, payload: Mapping[str, object]) -> "TokenwisePCAResidualStatistics":
+        result = cls(
+            mean=torch.as_tensor(payload["mean"], dtype=torch.float32),
+            principal_components=torch.as_tensor(payload["principal_components"], dtype=torch.float32),
+            residual_mean=torch.as_tensor(payload["residual_mean"], dtype=torch.float32),
+            residual_std=torch.as_tensor(payload["residual_std"], dtype=torch.float32),
+            eligible_tokens=torch.as_tensor(payload["eligible_tokens"], dtype=torch.bool),
+            observation_counts=torch.as_tensor(payload["observation_counts"], dtype=torch.int64),
+            principal_dim=int(payload["principal_dim"]),
+            min_observations=int(payload["min_observations"]),
+        )
+        result.validate()
+        return result
+
+
+def fit_tokenwise_pca_residual_statistics(
+    features: torch.Tensor,
+    valid_mask: torch.Tensor,
+    *,
+    principal_dim: int,
+    min_observations: int = 1001,
+) -> TokenwisePCAResidualStatistics:
+    """Fit independent PCA subspaces with position-specific ID residual scales.
+
+    This exact in-memory helper deliberately serves a *token block*.  The
+    airplane asset builder feeds it small blocks from durable feature shards,
+    which keeps the full prefix tensor and all 700+ PCA bases out of RAM.
+    """
+
+    if features.ndim != 3:
+        raise ValueError("token-wise PCA features must have shape [observations, tokens, features]")
+    observations, tokens, hidden_dim = features.shape
+    if valid_mask.shape != (observations, tokens):
+        raise ValueError("token-wise PCA valid_mask must have shape [observations, tokens]")
+    if not 0 < principal_dim <= hidden_dim:
+        raise ValueError("token-wise PCA principal_dim must lie in [1, hidden_dim]")
+    if min_observations < principal_dim + 1:
+        raise ValueError("token-wise PCA min_observations must exceed principal_dim")
+    if not torch.isfinite(features).all():
+        raise ValueError("token-wise PCA features must be finite")
+
+    values = features.detach().to(device="cpu", dtype=torch.float64)
+    mask = valid_mask.detach().to(device="cpu", dtype=torch.bool)
+    counts = mask.sum(dim=0, dtype=torch.int64)
+    eligible = counts >= min_observations
+    mean = torch.zeros((tokens, hidden_dim), dtype=torch.float64)
+    components = torch.zeros((tokens, hidden_dim, principal_dim), dtype=torch.float64)
+    residual_mean = torch.zeros(tokens, dtype=torch.float64)
+    residual_std = torch.zeros(tokens, dtype=torch.float64)
+
+    for token in torch.nonzero(eligible, as_tuple=False).flatten().tolist():
+        token_values = values[mask[:, token], token]
+        token_mean = token_values.mean(dim=0)
+        centered = token_values - token_mean
+        covariance = centered.transpose(0, 1) @ centered / token_values.shape[0]
+        _eigenvalues, eigenvectors = torch.linalg.eigh(covariance)
+        token_components = eigenvectors[:, -principal_dim:]
+        residual = torch.linalg.vector_norm(
+            centered - (centered @ token_components) @ token_components.transpose(0, 1), dim=-1
+        )
+        mean[token] = token_mean
+        components[token] = token_components
+        residual_mean[token] = residual.mean()
+        residual_std[token] = residual.std(unbiased=False)
+
+    result = TokenwisePCAResidualStatistics(
+        mean=mean.to(dtype=torch.float32),
+        principal_components=components.to(dtype=torch.float32),
+        residual_mean=residual_mean.to(dtype=torch.float32),
+        residual_std=residual_std.to(dtype=torch.float32),
+        eligible_tokens=eligible,
+        observation_counts=counts,
+        principal_dim=principal_dim,
+        min_observations=min_observations,
+    )
+    result.validate()
+    return result
+
+
+def tokenwise_pca_residual_scores(
+    features: torch.Tensor, statistics: TokenwisePCAResidualStatistics
+) -> torch.Tensor:
+    """Return unscaled residuals; ineligible positions are set to zero."""
+
+    statistics.validate()
+    if features.ndim != 3:
+        raise ValueError("token-wise PCA features must have shape [batch, tokens, features]")
+    batch, tokens, hidden_dim = features.shape
+    if (tokens, hidden_dim) != tuple(statistics.mean.shape):
+        raise ValueError("token-wise PCA feature shape does not match fitted statistics")
+    values = features.to(dtype=torch.float32)
+    mean = statistics.mean.to(values.device)
+    components = statistics.principal_components.to(values.device)
+    centered = values - mean.unsqueeze(0)
+    coordinates = torch.einsum("bth,thr->btr", centered, components)
+    reconstruction = torch.einsum("btr,thr->bth", coordinates, components)
+    residual = torch.linalg.vector_norm(centered - reconstruction, dim=-1)
+    eligible = statistics.eligible_tokens.to(values.device)
+    residual = torch.where(eligible.unsqueeze(0), residual, torch.zeros_like(residual))
+    if residual.shape != (batch, tokens) or not torch.isfinite(residual).all():
+        raise RuntimeError("token-wise PCA residual produced invalid scores")
+    return residual
+
+
+def tokenwise_pca_z_scores(
+    features: torch.Tensor,
+    valid_mask: torch.Tensor,
+    statistics: TokenwisePCAResidualStatistics,
+    *,
+    epsilon: float = 1e-6,
+) -> torch.Tensor:
+    """Standardize residuals and mark padding/ineligible tokens as ``-inf``."""
+
+    if epsilon <= 0:
+        raise ValueError("token-wise PCA epsilon must be positive")
+    if valid_mask.shape != tuple(features.shape[:2]):
+        raise ValueError("token-wise PCA valid_mask does not match features")
+    residual = tokenwise_pca_residual_scores(features, statistics)
+    mean = statistics.residual_mean.to(residual.device)
+    std = statistics.residual_std.to(residual.device).clamp_min(epsilon)
+    z_scores = (residual - mean.unsqueeze(0)) / std.unsqueeze(0)
+    usable = valid_mask.to(device=residual.device, dtype=torch.bool) & statistics.eligible_tokens.to(residual.device)
+    return torch.where(usable, z_scores, torch.full_like(z_scores, -torch.inf))
+
+
+def tokenwise_topk_mean(
+    scores: torch.Tensor, *, k: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return TopK mean and token indices, rejecting rows with too few tokens."""
+
+    if scores.ndim != 2:
+        raise ValueError("token-wise TopK scores must have shape [batch, tokens]")
+    if k < 1 or k > scores.shape[1]:
+        raise ValueError("token-wise TopK k is outside the token dimension")
+    usable = torch.isfinite(scores)
+    if torch.any(usable.sum(dim=-1) < k):
+        raise ValueError("not enough valid token-wise PCA scores for requested TopK")
+    values, indices = torch.topk(scores, k=k, dim=-1)
+    return values.mean(dim=-1), indices
+
+
 def fixed_gaussian_prior(
     *, action_horizon: int, action_dim: int, seed: int, device: torch.device | str = "cpu"
 ) -> torch.Tensor:

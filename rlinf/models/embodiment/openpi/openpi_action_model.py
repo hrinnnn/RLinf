@@ -873,6 +873,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         compute_values=True,
         **kwargs,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
+        return_prefix_probes = bool(kwargs.pop("return_prefix_probes", False))
         to_process_obs = self.obs_processor(env_obs)  # env obs -> policy input obs
         processed_obs = self.input_transform(
             to_process_obs, transpose=False
@@ -899,6 +900,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
                 noise=noise_actions,
                 mode="eval",
                 compute_values=compute_values,
+                return_prefix_probes=return_prefix_probes,
             )
 
             # Step 3: Extract actual actions for environment interaction
@@ -915,7 +917,10 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         else:
             # Non-DSRL or eval mode
             outputs = self.sample_actions(
-                observation, mode=mode, compute_values=compute_values
+                observation,
+                mode=mode,
+                compute_values=compute_values,
+                return_prefix_probes=return_prefix_probes,
             )
             actions = self.output_transform(
                 {"actions": outputs["actions"], "state": observation.state}
@@ -957,6 +962,8 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             "prev_values": prev_values,
             "forward_inputs": forward_inputs,
         }
+        if return_prefix_probes:
+            result["prefix_probes"] = outputs["prefix_probes"]
         return actions, result
 
     @torch.no_grad()
@@ -1168,6 +1175,7 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         noise=None,
         mode="train",
         compute_values=True,
+        return_prefix_probes: bool = False,
     ) -> torch.Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
         bsize = observation.state.shape[0]
@@ -1183,11 +1191,15 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             self._preprocess_observation(observation, train=False)
         )
 
-        prefix_output, prefix_pad_masks, past_key_values = self._build_prefix_cache(
-            images, img_masks, lang_tokens, lang_masks
+        prefix_cache = self._build_prefix_cache(
+            images, img_masks, lang_tokens, lang_masks, return_prefix_probes=return_prefix_probes
         )
+        if return_prefix_probes:
+            prefix_output, prefix_pad_masks, past_key_values, prefix_probes = prefix_cache
+        else:
+            prefix_output, prefix_pad_masks, past_key_values = prefix_cache
 
-        return self._sample_actions_with_prefix_cache(
+        outputs = self._sample_actions_with_prefix_cache(
             state,
             prefix_output,
             prefix_pad_masks,
@@ -1196,6 +1208,31 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             mode=mode,
             compute_values=compute_values,
         )
+        if return_prefix_probes:
+            outputs["prefix_probes"] = prefix_probes
+        return outputs
+
+    @torch.no_grad()
+    def extract_prefix_probes_from_observation(self, env_obs: dict[str, Any]) -> dict[str, Any]:
+        """Run the VLM prefix once without sampling an action chunk.
+
+        Asset fitting only needs ID prefix representations. Runtime rollouts
+        instead use ``predict_action_batch(return_prefix_probes=True)`` so the
+        probe is tied to the exact action-generating forward.
+        """
+
+        to_process_obs = self.obs_processor(env_obs)
+        processed_obs = self.precision_processor(
+            self.input_transform(to_process_obs, transpose=False)
+        )
+        observation = _model.Observation.from_dict(processed_obs)
+        images, img_masks, lang_tokens, lang_masks, _state = self._preprocess_observation(
+            observation, train=False
+        )
+        _prefix_output, _prefix_pad_masks, _past_key_values, probes = self._build_prefix_cache(
+            images, img_masks, lang_tokens, lang_masks, return_prefix_probes=True
+        )
+        return probes
 
     def _sample_actions_with_prefix_cache(
         self,
@@ -1653,7 +1690,9 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             result["action_expert_final"] = suffix_out.to(dtype=torch.float32)
         return result
 
-    def _build_prefix_cache(self, images, img_masks, lang_tokens, lang_masks):
+    def _build_prefix_cache(
+        self, images, img_masks, lang_tokens, lang_masks, *, return_prefix_probes: bool = False
+    ):
         """Embed prefix tokens and compute KV cache for efficient suffix generation."""
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
@@ -1669,7 +1708,38 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             inputs_embeds=[prefix_embs, None],
             use_cache=True,
         )
-        return prefix_output, prefix_pad_masks, past_key_values
+        if not return_prefix_probes:
+            return prefix_output, prefix_pad_masks, past_key_values
+
+        # π0.5's two-camera ManiSkill prefix has 256 vision tokens per image
+        # followed by 200 language/state slots. Keep the source map explicit:
+        # downstream token-wise detectors must never infer it from padding.
+        image_tokens = 256
+        language_tokens = 200
+        expected_tokens = len(images) * image_tokens + language_tokens
+        if len(images) != 2 or prefix_embs.shape[1] != expected_tokens:
+            raise RuntimeError(
+                "prefix probe expects exactly two 256-token images and 200 language/state slots, "
+                f"got images={len(images)}, prefix_shape={tuple(prefix_embs.shape)}"
+            )
+        source_ids = torch.full(
+            (prefix_embs.shape[1],), 2, dtype=torch.int8, device=prefix_embs.device
+        )
+        source_ids[:image_tokens] = 0
+        source_ids[image_tokens : 2 * image_tokens] = 1
+        prefix_probes = {
+            "format": "openpi_prefix_token_probe_v1",
+            # Preserve the model's native precision for durable expert feature
+            # shards. Scorers explicitly promote blocks to float32/float64;
+            # eagerly casting every [T,D] prefix would double a 9k-observation
+            # airplane cache from roughly 50 GB to 100 GB.
+            "vlm_input": prefix_embs.detach(),
+            "bridge": prefix_output.detach(),
+            "valid_mask": prefix_pad_masks.detach().to(dtype=torch.bool),
+            "source_ids": source_ids.detach().to(device="cpu"),
+            "source_names": ("base_camera", "wrist_camera", "language_state"),
+        }
+        return prefix_output, prefix_pad_masks, past_key_values, prefix_probes
 
     def _compute_value_from_suffix(self, suffix_out):
         """Compute value from suffix output using value head."""
