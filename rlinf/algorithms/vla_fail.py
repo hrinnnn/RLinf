@@ -450,6 +450,7 @@ def fit_tokenwise_pca_residual_statistics(
     *,
     principal_dim: int,
     min_observations: int = 1001,
+    compute_device: torch.device | str = "cpu",
 ) -> TokenwisePCAResidualStatistics:
     """Fit independent PCA subspaces with position-specific ID residual scales.
 
@@ -470,14 +471,20 @@ def fit_tokenwise_pca_residual_statistics(
     if not torch.isfinite(features).all():
         raise ValueError("token-wise PCA features must be finite")
 
-    values = features.detach().to(device="cpu", dtype=torch.float64)
-    mask = valid_mask.detach().to(device="cpu", dtype=torch.bool)
+    device = torch.device(compute_device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("token-wise PCA requested CUDA but CUDA is unavailable")
+    # Fitting runs in FP64, but only a small token block is resident. The
+    # caller selects CPU for portable tests or an idle GPU for the many
+    # independent rank-1000 factorizations used by the airplane protocol.
+    values = features.detach().to(device=device, dtype=torch.float64)
+    mask = valid_mask.detach().to(device=device, dtype=torch.bool)
     counts = mask.sum(dim=0, dtype=torch.int64)
     eligible = counts >= min_observations
-    mean = torch.zeros((tokens, hidden_dim), dtype=torch.float64)
-    components = torch.zeros((tokens, hidden_dim, principal_dim), dtype=torch.float64)
-    residual_mean = torch.zeros(tokens, dtype=torch.float64)
-    residual_std = torch.zeros(tokens, dtype=torch.float64)
+    mean = torch.zeros((tokens, hidden_dim), dtype=torch.float64, device=device)
+    components = torch.zeros((tokens, hidden_dim, principal_dim), dtype=torch.float64, device=device)
+    residual_mean = torch.zeros(tokens, dtype=torch.float64, device=device)
+    residual_std = torch.zeros(tokens, dtype=torch.float64, device=device)
 
     for token in torch.nonzero(eligible, as_tuple=False).flatten().tolist():
         token_values = values[mask[:, token], token]
@@ -495,12 +502,12 @@ def fit_tokenwise_pca_residual_statistics(
         residual_std[token] = residual.std(unbiased=False)
 
     result = TokenwisePCAResidualStatistics(
-        mean=mean.to(dtype=torch.float32),
-        principal_components=components.to(dtype=torch.float32),
-        residual_mean=residual_mean.to(dtype=torch.float32),
-        residual_std=residual_std.to(dtype=torch.float32),
-        eligible_tokens=eligible,
-        observation_counts=counts,
+        mean=mean.cpu().to(dtype=torch.float32),
+        principal_components=components.cpu().to(dtype=torch.float32),
+        residual_mean=residual_mean.cpu().to(dtype=torch.float32),
+        residual_std=residual_std.cpu().to(dtype=torch.float32),
+        eligible_tokens=eligible.cpu(),
+        observation_counts=counts.cpu(),
         principal_dim=principal_dim,
         min_observations=min_observations,
     )
