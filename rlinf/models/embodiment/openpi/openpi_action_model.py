@@ -30,6 +30,7 @@ from torch.utils._pytree import tree_map
 
 from rlinf.algorithms.awbc import weighted_flow_matching_loss
 from rlinf.algorithms.vla_fail import (
+    compact_two_camera_prefix_probe_tokens,
     pool_valid_prefix_tokens,
     resolve_feature_probe_indices,
 )
@@ -1711,31 +1712,21 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         if not return_prefix_probes:
             return prefix_output, prefix_pad_masks, past_key_values
 
-        # π0.5's two-camera ManiSkill prefix has 256 vision tokens per image
-        # followed by 200 language/state slots. Keep the source map explicit:
-        # downstream token-wise detectors must never infer it from padding.
-        image_tokens = 256
-        language_tokens = 200
-        expected_tokens = len(images) * image_tokens + language_tokens
-        if len(images) != 2 or prefix_embs.shape[1] != expected_tokens:
-            raise RuntimeError(
-                "prefix probe expects exactly two 256-token images and 200 language/state slots, "
-                f"got images={len(images)}, prefix_shape={tuple(prefix_embs.shape)}"
-            )
-        source_ids = torch.full(
-            (prefix_embs.shape[1],), 2, dtype=torch.int8, device=prefix_embs.device
+        vlm_input, bridge, valid_mask, source_ids = compact_two_camera_prefix_probe_tokens(
+            num_images=len(images),
+            prefix_embs=prefix_embs,
+            prefix_output=prefix_output,
+            prefix_valid_mask=prefix_pad_masks,
         )
-        source_ids[:image_tokens] = 0
-        source_ids[image_tokens : 2 * image_tokens] = 1
         prefix_probes = {
             "format": "openpi_prefix_token_probe_v1",
             # Preserve the model's native precision for durable expert feature
             # shards. Scorers explicitly promote blocks to float32/float64;
             # eagerly casting every [T,D] prefix would double a 9k-observation
             # airplane cache from roughly 50 GB to 100 GB.
-            "vlm_input": prefix_embs.detach(),
-            "bridge": prefix_output.detach(),
-            "valid_mask": prefix_pad_masks.detach().to(dtype=torch.bool),
+            "vlm_input": vlm_input.detach(),
+            "bridge": bridge.detach(),
+            "valid_mask": valid_mask.detach().to(dtype=torch.bool),
             "source_ids": source_ids.detach().to(device="cpu"),
             "source_names": ("base_camera", "wrist_camera", "language_state"),
         }

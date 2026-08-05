@@ -52,6 +52,51 @@ def pool_valid_prefix_tokens(hidden_states: torch.Tensor, pad_mask: torch.Tensor
     return (hidden_states * weights).sum(dim=1, keepdim=True) / counts
 
 
+def compact_two_camera_prefix_probe_tokens(
+    *,
+    num_images: int,
+    prefix_embs: torch.Tensor,
+    prefix_output: torch.Tensor,
+    prefix_valid_mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Remove OpenPI's all-padding extra-view template from a two-camera probe.
+
+    The policy can internally reserve a third 256-token image slot. For this
+    controlled two-camera protocol that slot must be fully invalid; compacting
+    it exposes the registered 512 vision + 200 language/state token layout
+    without changing the underlying action forward.
+    """
+
+    image_tokens, language_tokens = 256, 200
+    two_camera_tokens = 2 * image_tokens + language_tokens
+    if num_images == 2 and prefix_embs.shape[1] == two_camera_tokens:
+        indices = torch.arange(two_camera_tokens, device=prefix_embs.device)
+    elif num_images == 3 and prefix_embs.shape[1] == 3 * image_tokens + language_tokens:
+        dummy_start, dummy_end = 2 * image_tokens, 3 * image_tokens
+        if torch.any(prefix_valid_mask[:, dummy_start:dummy_end]):
+            raise RuntimeError("three-image prefix has valid extra-view tokens; cannot treat it as two-camera input")
+        indices = torch.cat(
+            (
+                torch.arange(dummy_start, device=prefix_embs.device),
+                torch.arange(dummy_end, prefix_embs.shape[1], device=prefix_embs.device),
+            )
+        )
+    else:
+        raise RuntimeError(
+            "prefix probe expects either two real images or a fully padded third image template, "
+            f"got images={num_images}, prefix_shape={tuple(prefix_embs.shape)}"
+        )
+    source_ids = torch.full((two_camera_tokens,), 2, dtype=torch.int8, device=prefix_embs.device)
+    source_ids[:image_tokens] = 0
+    source_ids[image_tokens : 2 * image_tokens] = 1
+    return (
+        prefix_embs.index_select(1, indices),
+        prefix_output.index_select(1, indices),
+        prefix_valid_mask.index_select(1, indices),
+        source_ids,
+    )
+
+
 @dataclass(frozen=True)
 class LLMDStatistics:
     """One Gaussian feature model per action token."""
