@@ -48,6 +48,14 @@ NECK_REFINEMENT_CANDIDATES = (
     ("neck_center_x_minus_014_y_minus_042_z_plus_030", np.array([-0.014, -0.042, 0.030], dtype=np.float64)),
     ("neck_center_x_minus_020_y_minus_046_z_plus_026", np.array([-0.020, -0.046, 0.026], dtype=np.float64)),
     ("neck_center_x_minus_008_y_minus_046_z_plus_026", np.array([-0.008, -0.046, 0.026], dtype=np.float64)),
+    # Panda's TCP reference is not the collision-mesh centroid.  Preserve the
+    # previously validated vertical TCP level while centring only the lateral
+    # finger-closing axis on the neck.
+    ("neck_center_x_minus_014_y_minus_046_z_zero", np.array([-0.014, -0.046, 0.0], dtype=np.float64)),
+    ("neck_center_x_minus_014_y_minus_050_z_zero", np.array([-0.014, -0.050, 0.0], dtype=np.float64)),
+    ("neck_center_x_minus_014_y_minus_042_z_zero", np.array([-0.014, -0.042, 0.0], dtype=np.float64)),
+    ("neck_center_x_minus_020_y_minus_046_z_zero", np.array([-0.020, -0.046, 0.0], dtype=np.float64)),
+    ("neck_center_x_minus_008_y_minus_046_z_zero", np.array([-0.008, -0.046, 0.0], dtype=np.float64)),
     ("neck_y_minus_046_z_minus_010", np.array([0.0, -0.046, -0.010], dtype=np.float64)),
     ("neck_y_minus_046_z_zero", np.array([0.0, -0.046, 0.0], dtype=np.float64)),
     ("neck_y_minus_050_z_minus_010", np.array([0.0, -0.050, -0.010], dtype=np.float64)),
@@ -69,11 +77,11 @@ ORACLE_NECK_CANDIDATES = (
     # x=0,z=0 nominal pose was roughly 14 mm off-centre and near the mesh's
     # lower edge, so one finger could push the airplane before the other made
     # contact.  Keeping those poses as fallbacks polluted accepted expert data.
-    NECK_REFINEMENT_CANDIDATES[0],
-    NECK_REFINEMENT_CANDIDATES[1],
-    NECK_REFINEMENT_CANDIDATES[2],
-    NECK_REFINEMENT_CANDIDATES[3],
-    NECK_REFINEMENT_CANDIDATES[4],
+    NECK_REFINEMENT_CANDIDATES[5],
+    NECK_REFINEMENT_CANDIDATES[6],
+    NECK_REFINEMENT_CANDIDATES[7],
+    NECK_REFINEMENT_CANDIDATES[8],
+    NECK_REFINEMENT_CANDIDATES[9],
 )
 
 
@@ -184,9 +192,11 @@ def try_candidate(
         planner.control_mode = "pd_joint_pos"
     try:
         grasp_pose = _build_top_down_neck_pose(unwrapped, local_point, closing_sign=closing_sign)
+        object_p_before_approach = unwrapped.obj.pose.p[0].cpu().numpy().copy()
         initial_z = float(unwrapped.obj.pose.p[0, 2].cpu())
         reached_pregrasp = _move_with_planning_fallback(planner, grasp_pose * sapien.Pose([0.0, 0.0, -0.065]))
         reached_grasp = reached_pregrasp and _move_with_planning_fallback(planner, grasp_pose)
+        object_p_after_reach = unwrapped.obj.pose.p[0].cpu().numpy().copy()
         grasped_after_close = False
         close_executed_steps = 0
         if reached_grasp:
@@ -196,6 +206,7 @@ def try_candidate(
                 max_steps=close_steps,
                 stable_steps=stable_grasp_steps,
             )
+        object_p_after_close = unwrapped.obj.pose.p[0].cpu().numpy().copy()
         lifted = False
         moved_to_goal = False
         success = False
@@ -228,6 +239,15 @@ def try_candidate(
             "close_max_steps": close_steps,
             "close_executed_steps": close_executed_steps,
             "stable_grasp_steps": stable_grasp_steps,
+            "object_p_before_approach": object_p_before_approach.tolist(),
+            "object_p_after_reach": object_p_after_reach.tolist(),
+            "object_p_after_close": object_p_after_close.tolist(),
+            "object_xy_shift_before_close": float(
+                np.linalg.norm(object_p_after_reach[:2] - object_p_before_approach[:2])
+            ),
+            "object_xy_shift_during_close": float(
+                np.linalg.norm(object_p_after_close[:2] - object_p_after_reach[:2])
+            ),
             "reached_pregrasp": reached_pregrasp,
             "reached_grasp": reached_grasp,
             "grasped_after_close": grasped_after_close,

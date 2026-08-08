@@ -15,11 +15,11 @@ class _Planner:
 
 
 def test_formal_candidates_stay_centered_in_the_fuselage_neck() -> None:
-    mesh_center = np.array([-0.0135, -0.0455, 0.0300])
-    tolerance = np.array([0.007, 0.006, 0.005])
+    tcp_target = np.array([-0.0135, -0.0455, 0.0])
+    tolerance = np.array([0.007, 0.006, 0.001])
     for name, point in oracle.ORACLE_NECK_CANDIDATES:
         assert name.startswith("neck_center_")
-        assert np.all(np.abs(point - mesh_center) < tolerance)
+        assert np.all(np.abs(point - tcp_target) < tolerance)
 
 
 def test_close_stops_after_stable_grasp(monkeypatch) -> None:
