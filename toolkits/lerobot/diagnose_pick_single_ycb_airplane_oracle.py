@@ -65,19 +65,15 @@ NECK_REFINEMENT_CANDIDATES = (
 # fuselage region.  A failed attempt is reset to the identical seeded state,
 # so it never contaminates the accepted expert trajectory.
 ORACLE_NECK_CANDIDATES = (
-    # Keep the empirically strongest nominal pose first.  The mesh-centred
-    # poses below are geometric fallbacks, not replacements for the validated
-    # contact point.
-    NECK_REFINEMENT_CANDIDATES[6],
-    *NECK_REFINEMENT_CANDIDATES[:5],
-    NECK_REFINEMENT_CANDIDATES[11],
-    NECK_REFINEMENT_CANDIDATES[12],
-    NECK_REFINEMENT_CANDIDATES[13],
-    NECK_REFINEMENT_CANDIDATES[14],
-    NECK_REFINEMENT_CANDIDATES[15],
-    NECK_REFINEMENT_CANDIDATES[9],
-    NECK_REFINEMENT_CANDIDATES[5],
-    NECK_REFINEMENT_CANDIDATES[7],
+    # Only use poses centred in the collision-mesh neck.  The previous
+    # x=0,z=0 nominal pose was roughly 14 mm off-centre and near the mesh's
+    # lower edge, so one finger could push the airplane before the other made
+    # contact.  Keeping those poses as fallbacks polluted accepted expert data.
+    NECK_REFINEMENT_CANDIDATES[0],
+    NECK_REFINEMENT_CANDIDATES[1],
+    NECK_REFINEMENT_CANDIDATES[2],
+    NECK_REFINEMENT_CANDIDATES[3],
+    NECK_REFINEMENT_CANDIDATES[4],
 )
 
 
