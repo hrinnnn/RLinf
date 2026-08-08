@@ -109,6 +109,31 @@ def _is_grasping(unwrapped) -> bool:
     return _scalar(predicate(unwrapped.obj))
 
 
+def _close_gripper_until_stable_grasp(
+    planner,
+    unwrapped,
+    *,
+    max_steps: int,
+    stable_steps: int,
+) -> tuple[bool, int]:
+    """Close only until the grasp predicate remains true for a short window."""
+
+    if max_steps < 1:
+        raise ValueError("max_steps must be at least one")
+    if stable_steps < 1 or stable_steps > max_steps:
+        raise ValueError("stable_steps must be in [1, max_steps]")
+    consecutive_grasp_steps = 0
+    for executed_steps in range(1, max_steps + 1):
+        planner.close_gripper(t=1)
+        if _is_grasping(unwrapped):
+            consecutive_grasp_steps += 1
+            if consecutive_grasp_steps >= stable_steps:
+                return True, executed_steps
+        else:
+            consecutive_grasp_steps = 0
+    return False, max_steps
+
+
 def _build_top_down_neck_pose(unwrapped, local_point: np.ndarray, *, closing_sign: float = 1.0):
     """Build a top-down grasp centred on the narrow fuselage, not a wing."""
 
@@ -138,6 +163,7 @@ def try_candidate(
     reset_before_attempt: bool = True,
     force_planner_pd_joint_pos: bool = False,
     closing_sign: float = 1.0,
+    stable_grasp_steps: int = 4,
 ) -> dict[str, object]:
     """Run contact, lift, and optionally transport to the official goal."""
 
@@ -165,9 +191,15 @@ def try_candidate(
         initial_z = float(unwrapped.obj.pose.p[0, 2].cpu())
         reached_pregrasp = _move_with_planning_fallback(planner, grasp_pose * sapien.Pose([0.0, 0.0, -0.065]))
         reached_grasp = reached_pregrasp and _move_with_planning_fallback(planner, grasp_pose)
+        grasped_after_close = False
+        close_executed_steps = 0
         if reached_grasp:
-            planner.close_gripper(t=close_steps)
-        grasped_after_close = reached_grasp and _is_grasping(unwrapped)
+            grasped_after_close, close_executed_steps = _close_gripper_until_stable_grasp(
+                planner,
+                unwrapped,
+                max_steps=close_steps,
+                stable_steps=stable_grasp_steps,
+            )
         lifted = False
         moved_to_goal = False
         success = False
@@ -197,7 +229,9 @@ def try_candidate(
             "seed": seed,
             "candidate": name,
             "local_point": local_point.tolist(),
-            "close_steps": close_steps,
+            "close_max_steps": close_steps,
+            "close_executed_steps": close_executed_steps,
+            "stable_grasp_steps": stable_grasp_steps,
             "reached_pregrasp": reached_pregrasp,
             "reached_grasp": reached_grasp,
             "grasped_after_close": grasped_after_close,
