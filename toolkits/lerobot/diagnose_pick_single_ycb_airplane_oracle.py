@@ -69,19 +69,15 @@ NECK_REFINEMENT_CANDIDATES = (
     ("neck_y_minus_038_z_zero_flip", np.array([0.0, -0.038, 0.0], dtype=np.float64)),
 )
 
-# Fixed order for the task oracle.  Every option remains in the same narrow
-# fuselage region.  A failed attempt is reset to the identical seeded state,
-# so it never contaminates the accepted expert trajectory.
-ORACLE_NECK_CANDIDATES = (
-    # Only use poses centred in the collision-mesh neck.  The previous
-    # x=0,z=0 nominal pose was roughly 14 mm off-centre and near the mesh's
-    # lower edge, so one finger could push the airplane before the other made
-    # contact.  Keeping those poses as fallbacks polluted accepted expert data.
-    NECK_REFINEMENT_CANDIDATES[5],
-    NECK_REFINEMENT_CANDIDATES[6],
-    NECK_REFINEMENT_CANDIDATES[7],
-    NECK_REFINEMENT_CANDIDATES[8],
-    NECK_REFINEMENT_CANDIDATES[9],
+# Fixed order for the task oracle.  Raise the TCP as far as physics permits so
+# the open fingers straddle the neck instead of pushing it during descent.
+# Failed candidates are retried from the identical seeded state.
+ORACLE_NECK_CANDIDATES = tuple(
+    (
+        f"neck_center_x_minus_014_y_minus_046_z_plus_{millimetres:03d}",
+        np.array([-0.014, -0.046, z], dtype=np.float64),
+    )
+    for millimetres, z in ((20, 0.020), (15, 0.015), (10, 0.010), (5, 0.005), (0, 0.0))
 )
 
 

@@ -15,11 +15,16 @@ class _Planner:
 
 
 def test_formal_candidates_stay_centered_in_the_fuselage_neck() -> None:
-    tcp_target = np.array([-0.0135, -0.0455, 0.0])
-    tolerance = np.array([0.007, 0.006, 0.001])
+    tcp_xy = np.array([-0.0135, -0.0455])
     for name, point in oracle.ORACLE_NECK_CANDIDATES:
         assert name.startswith("neck_center_")
-        assert np.all(np.abs(point - tcp_target) < tolerance)
+        assert np.all(np.abs(point[:2] - tcp_xy) < np.array([0.001, 0.001]))
+        assert 0.0 <= point[2] <= 0.020
+
+
+def test_formal_candidates_scan_height_from_high_to_low() -> None:
+    heights = [point[2] for _, point in oracle.ORACLE_NECK_CANDIDATES]
+    assert heights == sorted(heights, reverse=True)
 
 
 def test_close_stops_after_stable_grasp(monkeypatch) -> None:
