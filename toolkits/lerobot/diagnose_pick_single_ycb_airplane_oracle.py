@@ -38,21 +38,46 @@ NECK_GRASP_CANDIDATES = (
 # offsets change where the fingers meet the fuselage; they do not move toward
 # either wing.
 NECK_REFINEMENT_CANDIDATES = (
+    # Collision-mesh component 7 is the narrow fuselage neck.  Its local
+    # bounds are approximately x=[-0.046, 0.019], y=[-0.077, -0.014],
+    # z=[0.007, 0.053], so the grasp centre must sit above and slightly left
+    # of the object origin.  The older x=0,z=0 candidates touched the lower
+    # edge and could report a transient grasp before slipping during lift.
+    ("neck_center_x_minus_014_y_minus_046_z_plus_030", np.array([-0.014, -0.046, 0.030], dtype=np.float64)),
+    ("neck_center_x_minus_014_y_minus_050_z_plus_030", np.array([-0.014, -0.050, 0.030], dtype=np.float64)),
+    ("neck_center_x_minus_014_y_minus_042_z_plus_030", np.array([-0.014, -0.042, 0.030], dtype=np.float64)),
+    ("neck_center_x_minus_020_y_minus_046_z_plus_026", np.array([-0.020, -0.046, 0.026], dtype=np.float64)),
+    ("neck_center_x_minus_008_y_minus_046_z_plus_026", np.array([-0.008, -0.046, 0.026], dtype=np.float64)),
+    # Panda's TCP reference is not the collision-mesh centroid.  Preserve the
+    # previously validated vertical TCP level while centring only the lateral
+    # finger-closing axis on the neck.
+    ("neck_center_x_minus_014_y_minus_046_z_zero", np.array([-0.014, -0.046, 0.0], dtype=np.float64)),
+    ("neck_center_x_minus_014_y_minus_050_z_zero", np.array([-0.014, -0.050, 0.0], dtype=np.float64)),
+    ("neck_center_x_minus_014_y_minus_042_z_zero", np.array([-0.014, -0.042, 0.0], dtype=np.float64)),
+    ("neck_center_x_minus_020_y_minus_046_z_zero", np.array([-0.020, -0.046, 0.0], dtype=np.float64)),
+    ("neck_center_x_minus_008_y_minus_046_z_zero", np.array([-0.008, -0.046, 0.0], dtype=np.float64)),
     ("neck_y_minus_046_z_minus_010", np.array([0.0, -0.046, -0.010], dtype=np.float64)),
     ("neck_y_minus_046_z_zero", np.array([0.0, -0.046, 0.0], dtype=np.float64)),
     ("neck_y_minus_050_z_minus_010", np.array([0.0, -0.050, -0.010], dtype=np.float64)),
     ("neck_y_minus_050_z_zero", np.array([0.0, -0.050, 0.0], dtype=np.float64)),
     ("neck_y_minus_054_z_minus_010", np.array([0.0, -0.054, -0.010], dtype=np.float64)),
     ("neck_y_minus_054_z_zero", np.array([0.0, -0.054, 0.0], dtype=np.float64)),
+    ("neck_y_minus_046_z_zero_flip", np.array([0.0, -0.046, 0.0], dtype=np.float64)),
+    ("neck_y_minus_042_z_zero", np.array([0.0, -0.042, 0.0], dtype=np.float64)),
+    ("neck_y_minus_042_z_zero_flip", np.array([0.0, -0.042, 0.0], dtype=np.float64)),
+    ("neck_y_minus_038_z_zero", np.array([0.0, -0.038, 0.0], dtype=np.float64)),
+    ("neck_y_minus_038_z_zero_flip", np.array([0.0, -0.038, 0.0], dtype=np.float64)),
 )
 
-# Fixed order for the task oracle.  Every option remains in the same narrow
-# fuselage region.  A failed attempt is reset to the identical seeded state,
-# so it never contaminates the accepted expert trajectory.
-ORACLE_NECK_CANDIDATES = (
-    NECK_REFINEMENT_CANDIDATES[4],
-    NECK_REFINEMENT_CANDIDATES[0],
-    NECK_REFINEMENT_CANDIDATES[2],
+# Fixed order for the task oracle.  Raise the TCP as far as physics permits so
+# the open fingers straddle the neck instead of pushing it during descent.
+# Failed candidates are retried from the identical seeded state.
+ORACLE_NECK_CANDIDATES = tuple(
+    (
+        f"neck_center_x_minus_014_y_minus_046_z_plus_{millimetres:03d}",
+        np.array([-0.014, -0.046, z], dtype=np.float64),
+    )
+    for millimetres, z in ((20, 0.020), (15, 0.015), (10, 0.010), (5, 0.005), (0, 0.0))
 )
 
 
@@ -84,7 +109,32 @@ def _is_grasping(unwrapped) -> bool:
     return _scalar(predicate(unwrapped.obj))
 
 
-def _build_top_down_neck_pose(unwrapped, local_point: np.ndarray):
+def _close_gripper_until_stable_grasp(
+    planner,
+    unwrapped,
+    *,
+    max_steps: int,
+    stable_steps: int,
+) -> tuple[bool, int]:
+    """Close only until the grasp predicate remains true for a short window."""
+
+    if max_steps < 1:
+        raise ValueError("max_steps must be at least one")
+    if stable_steps < 1 or stable_steps > max_steps:
+        raise ValueError("stable_steps must be in [1, max_steps]")
+    consecutive_grasp_steps = 0
+    for executed_steps in range(1, max_steps + 1):
+        planner.close_gripper(t=1)
+        if _is_grasping(unwrapped):
+            consecutive_grasp_steps += 1
+            if consecutive_grasp_steps >= stable_steps:
+                return True, executed_steps
+        else:
+            consecutive_grasp_steps = 0
+    return False, max_steps
+
+
+def _build_top_down_neck_pose(unwrapped, local_point: np.ndarray, *, closing_sign: float = 1.0):
     """Build a top-down grasp centred on the narrow fuselage, not a wing."""
 
     import sapien
@@ -92,19 +142,36 @@ def _build_top_down_neck_pose(unwrapped, local_point: np.ndarray):
     object_matrix = unwrapped.obj.pose.to_transformation_matrix()[0].cpu().numpy()
     world_point = object_matrix[:3, :3] @ local_point + object_matrix[:3, 3]
     approach = np.array([0.0, 0.0, -1.0])
-    closing = object_matrix[:3, :3] @ np.array([1.0, 0.0, 0.0])
+    closing = object_matrix[:3, :3] @ np.array([closing_sign, 0.0, 0.0])
+    # A policy may leave the airplane tilted before asking for help.  Preserve
+    # a top-down approach while projecting the fuselage-relative closing axis
+    # into its orthogonal plane, as required by Panda.build_grasp_pose.
+    closing = closing - approach * float(approach @ closing)
+    norm = float(np.linalg.norm(closing))
+    closing = closing / norm if norm > 1e-6 else np.array([1.0, 0.0, 0.0])
     return unwrapped.agent.build_grasp_pose(approach, closing, world_point)
 
 
 def try_candidate(
-    env, *, seed: int, name: str, local_point: np.ndarray, close_steps: int, complete_task: bool
+    env,
+    *,
+    seed: int,
+    name: str,
+    local_point: np.ndarray,
+    close_steps: int,
+    complete_task: bool,
+    reset_before_attempt: bool = True,
+    force_planner_pd_joint_pos: bool = False,
+    closing_sign: float = 1.0,
+    stable_grasp_steps: int = 4,
 ) -> dict[str, object]:
     """Run contact, lift, and optionally transport to the official goal."""
 
     import sapien
     from mani_skill.examples.motionplanning.panda.motionplanner import PandaArmMotionPlanningSolver
 
-    env.reset(seed=seed)
+    if reset_before_attempt:
+        env.reset(seed=seed)
     unwrapped = env.unwrapped
     planner = PandaArmMotionPlanningSolver(
         env,
@@ -114,14 +181,28 @@ def try_candidate(
         visualize_target_grasp_pose=False,
         print_env_info=False,
     )
+    if force_planner_pd_joint_pos:
+        # A caller may adapt each absolute joint target into another control
+        # mode inside env.step.  Keep planner outputs in the standard 8-D
+        # [joint_target, gripper] form in that case.
+        planner.control_mode = "pd_joint_pos"
     try:
-        grasp_pose = _build_top_down_neck_pose(unwrapped, local_point)
+        grasp_pose = _build_top_down_neck_pose(unwrapped, local_point, closing_sign=closing_sign)
+        object_p_before_approach = unwrapped.obj.pose.p[0].cpu().numpy().copy()
         initial_z = float(unwrapped.obj.pose.p[0, 2].cpu())
         reached_pregrasp = _move_with_planning_fallback(planner, grasp_pose * sapien.Pose([0.0, 0.0, -0.065]))
         reached_grasp = reached_pregrasp and _move_with_planning_fallback(planner, grasp_pose)
+        object_p_after_reach = unwrapped.obj.pose.p[0].cpu().numpy().copy()
+        grasped_after_close = False
+        close_executed_steps = 0
         if reached_grasp:
-            planner.close_gripper(t=close_steps)
-        grasped_after_close = reached_grasp and _is_grasping(unwrapped)
+            grasped_after_close, close_executed_steps = _close_gripper_until_stable_grasp(
+                planner,
+                unwrapped,
+                max_steps=close_steps,
+                stable_steps=stable_grasp_steps,
+            )
+        object_p_after_close = unwrapped.obj.pose.p[0].cpu().numpy().copy()
         lifted = False
         moved_to_goal = False
         success = False
@@ -151,7 +232,18 @@ def try_candidate(
             "seed": seed,
             "candidate": name,
             "local_point": local_point.tolist(),
-            "close_steps": close_steps,
+            "close_max_steps": close_steps,
+            "close_executed_steps": close_executed_steps,
+            "stable_grasp_steps": stable_grasp_steps,
+            "object_p_before_approach": object_p_before_approach.tolist(),
+            "object_p_after_reach": object_p_after_reach.tolist(),
+            "object_p_after_close": object_p_after_close.tolist(),
+            "object_xy_shift_before_close": float(
+                np.linalg.norm(object_p_after_reach[:2] - object_p_before_approach[:2])
+            ),
+            "object_xy_shift_during_close": float(
+                np.linalg.norm(object_p_after_close[:2] - object_p_after_reach[:2])
+            ),
             "reached_pregrasp": reached_pregrasp,
             "reached_grasp": reached_grasp,
             "grasped_after_close": grasped_after_close,
@@ -182,6 +274,7 @@ def run_oracle_with_fallback(env, *, seed: int, close_steps: int, complete_task:
             local_point=local_point,
             close_steps=close_steps,
             complete_task=complete_task,
+            closing_sign=-1.0 if name.endswith("_flip") else 1.0,
         )
         attempts.append(attempt)
         if bool(attempt["accepted"]):
@@ -241,6 +334,7 @@ def main() -> None:
                         local_point=point,
                         close_steps=args.close_steps,
                         complete_task=args.complete_task,
+                        closing_sign=-1.0 if name.endswith("_flip") else 1.0,
                     ),
                 }
                 for name, point in candidates
