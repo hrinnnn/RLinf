@@ -189,7 +189,7 @@ def solve_episode(env, seed: int, planner) -> dict[str, Any]:
     reached, steps = _move_to_pose(
         env,
         planner,
-        object_grasp * sapien.Pose([0.0, 0.0, -0.075]),
+        object_grasp * sapien.Pose([0.0, 0.0, -0.140]),
         gripper=1.0,
     )
     stages["reached_object_pregrasp"] = reached
