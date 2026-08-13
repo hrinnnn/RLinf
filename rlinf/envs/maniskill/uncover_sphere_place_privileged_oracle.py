@@ -102,7 +102,10 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             obb,
             approaching=approaching,
             target_closing=closing,
-            depth=0.012 if "sphere" in str(getattr(actor, "name", "")) else 0.025,
+            # Match the official Panda sphere solver's finger depth.  The
+            # sphere is small, so the shorter exploratory depth can produce a
+            # marginal contact that does not survive the lift.
+            depth=0.025 if "sphere" in str(getattr(actor, "name", "")) else 0.025,
         )
         # Use the live actor center.  For this box cover, the OBB helper's
         # approach-dependent center is offset from the physical center.
@@ -299,8 +302,15 @@ class UncoverSpherePlacePrivilegedChunkOracle:
                     p=[bowl_p[0], bowl_p[1], TABLE_Z + SPHERE_RADIUS], q=sphere_pose.q
                 )
                 target = self._object_target_tcp(base, base.sphere, target_sphere, sapien)
-                self._phase = "sphere_open"
-                return target, -1.0, "sphere_place"
+                # Keep the gripper closed until the live sphere pose reaches
+                # the bowl.  Switching phases when the path is merely
+                # planned releases the sphere several chunks too early.
+                if np.linalg.norm(
+                    _first_vector(base.sphere.pose.p, 3) - _first_vector(target_sphere.p, 3)
+                ) < 0.035:
+                    self._phase = "sphere_open"
+                else:
+                    return target, -1.0, "sphere_place"
 
         if self._phase == "sphere_open":
             self._phase = "done"
