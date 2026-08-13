@@ -103,10 +103,10 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             obb,
             approaching=approaching,
             target_closing=closing,
-            # Match the official Panda sphere solver's finger depth.  The
-            # sphere is small, so the shorter exploratory depth can produce a
-            # marginal contact that does not survive the lift.
-            depth=0.025 if "sphere" in str(getattr(actor, "name", "")) else 0.025,
+            # Place the TCP at the live sphere center.  Using a fixed depth
+            # would move the grasp point above the center after the sphere
+            # radius is changed for this controlled task.
+            depth=SPHERE_RADIUS if "sphere" in str(getattr(actor, "name", "")) else 0.025,
         )
         # Use the live actor center.  For this box cover, the OBB helper's
         # approach-dependent center is offset from the physical center.

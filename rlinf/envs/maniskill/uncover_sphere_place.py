@@ -33,7 +33,9 @@ UNCOVER_ENV_IDS = {
 
 TABLE_Z = 0.02
 MUG_HALF_SIZE = (0.03, 0.025, 0.025)
-SPHERE_RADIUS = 0.025
+# A slightly larger sphere keeps the task visually simple while giving the
+# Panda gripper a stable contact margin for the privileged oracle and policy.
+SPHERE_RADIUS = 0.035
 BOWL_RADIUS = 0.065
 PARKING_XY = np.array([-0.16, 0.16], dtype=np.float32)
 
