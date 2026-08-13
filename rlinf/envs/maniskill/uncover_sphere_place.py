@@ -31,7 +31,8 @@ UNCOVER_ENV_IDS = {
     "goal_ood": "RLinfUncoverSpherePlaceGoalOOD-v1",
 }
 
-TABLE_Z = 0.02
+# TableSceneBuilder places the table top at z=0 in the world frame.
+TABLE_Z = 0.0
 MUG_HALF_SIZE = (0.03, 0.025, 0.025)
 # A slightly larger sphere keeps the task visually simple while giving the
 # Panda gripper a stable contact margin for the privileged oracle and policy.
