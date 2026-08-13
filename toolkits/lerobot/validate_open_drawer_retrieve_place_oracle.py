@@ -184,6 +184,7 @@ def solve_episode(env, seed: int, planner) -> dict[str, Any]:
 
     object_matrix = base.obj.pose.to_transformation_matrix()[0].cpu().numpy()
     object_center = object_matrix[:3, 3]
+    object_center[2] += 0.057
     object_closing = object_matrix[:3, 1]
     object_grasp = _top_down_grasp(base, object_center, object_closing)
     reached, steps = _move_to_pose(
@@ -194,13 +195,7 @@ def solve_episode(env, seed: int, planner) -> dict[str, Any]:
     )
     stages["reached_object_pregrasp"] = reached
     stages["object_pregrasp_steps"] = steps
-    reached, steps = _move_to_pose(
-        env,
-        planner,
-        object_grasp,
-        gripper=1.0,
-        position_tolerance=0.025,
-    )
+    reached, steps = _move_to_pose(env, planner, object_grasp, gripper=1.0)
     stages["reached_object"] = stages["reached_object_pregrasp"] and reached
     stages["object_reach_steps"] = steps
     if stages["reached_object"]:
