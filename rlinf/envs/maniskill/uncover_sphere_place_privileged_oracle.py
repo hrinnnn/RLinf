@@ -277,10 +277,12 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             return None, 1.0, "cover_open"
 
         if self._phase == "sphere_reach":
-            if self._sphere_grasp_pose is None:
-                self._sphere_grasp_pose = self._find_grasp_pose(
-                    env, base.sphere, attempt=self._sphere_attempts
-                )
+            # The sphere is dynamic and can roll slightly when the cover is
+            # parked. Recompute from its live pose at every chunk instead of
+            # pursuing a stale grasp target.
+            self._sphere_grasp_pose = self._find_grasp_pose(
+                env, base.sphere, attempt=self._sphere_attempts
+            )
             reach = self._sphere_grasp_pose * sapien.Pose([0, 0, -0.04])
             if self._at_pose(base.agent.tcp.pose.sp, reach):
                 self._phase = "sphere_grasp"
@@ -288,7 +290,9 @@ class UncoverSpherePlacePrivilegedChunkOracle:
                 return reach, 1.0, "sphere_reach"
 
         if self._phase == "sphere_grasp":
-            assert self._sphere_grasp_pose is not None
+            self._sphere_grasp_pose = self._find_grasp_pose(
+                env, base.sphere, attempt=self._sphere_attempts
+            )
             if not self._at_pose(base.agent.tcp.pose.sp, self._sphere_grasp_pose):
                 return self._sphere_grasp_pose, 1.0, "sphere_grasp"
             self._phase = "sphere_close"
