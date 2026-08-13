@@ -244,21 +244,21 @@ class OpenDrawerRetrievePlaceEnv(BaseEnv):
         return self.compute_dense_reward(obs, action, info) / 5.0
 
 
-@register_env(ENV_IDS["id"], max_episode_steps=250)
+@register_env(ENV_IDS["id"], max_episode_steps=400)
 class OpenDrawerRetrievePlaceIDEnv(OpenDrawerRetrievePlaceEnv):
     rlinf_split = "id"
 
 
-@register_env(ENV_IDS["handle_ood"], max_episode_steps=250)
+@register_env(ENV_IDS["handle_ood"], max_episode_steps=400)
 class OpenDrawerRetrievePlaceHandleOODEnv(OpenDrawerRetrievePlaceEnv):
     rlinf_split = "handle_ood"
 
 
-@register_env(ENV_IDS["grasp_ood"], max_episode_steps=250)
+@register_env(ENV_IDS["grasp_ood"], max_episode_steps=400)
 class OpenDrawerRetrievePlaceGraspOODEnv(OpenDrawerRetrievePlaceEnv):
     rlinf_split = "grasp_ood"
 
 
-@register_env(ENV_IDS["goal_ood"], max_episode_steps=250)
+@register_env(ENV_IDS["goal_ood"], max_episode_steps=400)
 class OpenDrawerRetrievePlaceGoalOODEnv(OpenDrawerRetrievePlaceEnv):
     rlinf_split = "goal_ood"

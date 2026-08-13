@@ -29,13 +29,6 @@ def _vector(value: Any, length: int | None = None) -> np.ndarray:
     return result if length is None else result[:length]
 
 
-def _move(planner, pose) -> bool:
-    result = planner.move_to_pose_with_screw(pose)
-    if result != -1:
-        return True
-    return planner.move_to_pose_with_RRTConnect(pose) != -1
-
-
 def _top_down_grasp(base, center: np.ndarray, closing: np.ndarray):
     closing = np.asarray(closing, dtype=np.float64)
     closing[2] = 0.0
@@ -47,10 +40,46 @@ def _top_down_grasp(base, center: np.ndarray, closing: np.ndarray):
     )
 
 
-def _close_until_object_grasped(planner, base, *, max_steps: int = 20, stable_steps: int = 3):
+def _pose_action(base, target_world, gripper: float) -> np.ndarray:
+    from transforms3d.euler import quat2euler
+
+    target_at_base = base.agent.robot.pose.sp.inv() * target_world
+    euler = quat2euler(np.asarray(target_at_base.q), axes="sxyz")
+    return np.asarray([*target_at_base.p, *euler, gripper], dtype=np.float32)
+
+
+def _servo_to_pose(
+    env,
+    target_world,
+    *,
+    gripper: float,
+    max_steps: int = 40,
+    position_tolerance: float = 0.012,
+) -> tuple[bool, int]:
+    base = env.unwrapped
+    action = _pose_action(base, target_world, gripper)
+    for step in range(1, max_steps + 1):
+        env.step(action)
+        position_error = np.linalg.norm(
+            _vector(base.agent.tcp.pose.p, 3) - np.asarray(target_world.p)
+        )
+        if position_error <= position_tolerance:
+            return True, step
+    return False, max_steps
+
+
+def _hold_gripper(env, *, gripper: float, steps: int) -> None:
+    base = env.unwrapped
+    target = base.agent.tcp.pose.sp
+    action = _pose_action(base, target, gripper)
+    for _ in range(steps):
+        env.step(action)
+
+
+def _close_until_object_grasped(env, base, *, max_steps: int = 24, stable_steps: int = 3):
     consecutive = 0
     for step in range(1, max_steps + 1):
-        planner.close_gripper(t=1)
+        _hold_gripper(env, gripper=-1.0, steps=1)
         if _scalar(base.agent.is_grasping(base.obj)):
             consecutive += 1
             if consecutive >= stable_steps:
@@ -62,119 +91,124 @@ def _close_until_object_grasped(planner, base, *, max_steps: int = 20, stable_st
 
 def solve_episode(env, seed: int) -> dict[str, Any]:
     import sapien
-    from mani_skill.examples.motionplanning.panda.motionplanner import (
-        PandaArmMotionPlanningSolver,
-    )
 
     env.reset(seed=seed)
     base = env.unwrapped
-    planner = PandaArmMotionPlanningSolver(
-        env,
-        debug=False,
-        vis=False,
-        base_pose=base.agent.robot.pose,
-        visualize_target_grasp_pose=False,
-        print_env_info=False,
-    )
     stages: dict[str, Any] = {"seed": int(seed), "split": base.rlinf_split}
-    try:
-        handle_center = _vector(base.handle_world_position, 3)
-        handle_grasp = _top_down_grasp(base, handle_center, np.array([1.0, 0.0, 0.0]))
-        stages["reached_handle_pregrasp"] = _move(
-            planner, handle_grasp * sapien.Pose([0.0, 0.0, -0.065])
-        )
-        stages["reached_handle"] = stages["reached_handle_pregrasp"] and _move(
-            planner, handle_grasp
-        )
-        if stages["reached_handle"]:
-            planner.close_gripper(t=12)
-            tcp = base.agent.tcp.pose.sp
-            pull_target = sapien.Pose(tcp.p + np.array([-0.19, 0.0, 0.0]), tcp.q)
-            stages["pull_motion_completed"] = _move(planner, pull_target)
-        else:
-            stages["pull_motion_completed"] = False
-        stages["drawer_qpos_after_pull"] = float(_vector(base.drawer.get_qpos(), 1)[0])
-        stages["drawer_opened"] = stages["drawer_qpos_after_pull"] <= -0.16
-        planner.open_gripper(t=10)
-
-        object_matrix = base.obj.pose.to_transformation_matrix()[0].cpu().numpy()
-        object_center = object_matrix[:3, 3]
-        object_closing = object_matrix[:3, 1]
-        object_grasp = _top_down_grasp(base, object_center, object_closing)
-        stages["reached_object_pregrasp"] = _move(
-            planner, object_grasp * sapien.Pose([0.0, 0.0, -0.07])
-        )
-        stages["reached_object"] = stages["reached_object_pregrasp"] and _move(
-            planner, object_grasp
-        )
-        if stages["reached_object"]:
-            grasped, close_steps = _close_until_object_grasped(planner, base)
-        else:
-            grasped, close_steps = False, 0
-        stages["object_grasped"] = grasped
-        stages["object_close_steps"] = close_steps
-
-        initial_object_z = float(_vector(base.obj.pose.p, 3)[2])
-        stages["initial_object_z"] = initial_object_z
-        if grasped:
-            object_in_tcp = base.agent.tcp.pose.sp.inv() * base.obj.pose.sp
-            held = base.obj.pose.sp
-            lifted_object = sapien.Pose(held.p + np.array([0.0, 0.0, 0.13]), held.q)
-            stages["lift_motion_completed"] = _move(
-                planner, lifted_object * object_in_tcp.inv()
-            )
-        else:
-            stages["lift_motion_completed"] = False
-        lifted_z = float(_vector(base.obj.pose.p, 3)[2])
-        stages["lifted_object_z"] = lifted_z
-        stages["object_lifted"] = (
-            stages["lift_motion_completed"]
-            and _scalar(base.agent.is_grasping(base.obj))
-            and lifted_z - initial_object_z >= 0.08
-        )
-
-        if stages["object_lifted"]:
-            object_in_tcp = base.agent.tcp.pose.sp.inv() * base.obj.pose.sp
-            target_xy = _vector(base.target_tray.pose.p, 3)[:2]
-            current_object = base.obj.pose.sp
-            above_target = sapien.Pose(
-                [target_xy[0], target_xy[1], 0.15], current_object.q
-            )
-            stages["transport_completed"] = _move(
-                planner, above_target * object_in_tcp.inv()
-            )
-            place_target = sapien.Pose(
-                [target_xy[0], target_xy[1], 0.043], base.obj.pose.sp.q
-            )
-            stages["place_motion_completed"] = stages["transport_completed"] and _move(
-                planner, place_target * object_in_tcp.inv()
-            )
-        else:
-            stages["transport_completed"] = False
-            stages["place_motion_completed"] = False
-
-        planner.open_gripper(t=12)
+    handle_center = _vector(base.handle_world_position, 3)
+    handle_grasp = _top_down_grasp(base, handle_center, np.array([1.0, 0.0, 0.0]))
+    reached, steps = _servo_to_pose(
+        env, handle_grasp * sapien.Pose([0.0, 0.0, -0.075]), gripper=1.0
+    )
+    stages["reached_handle_pregrasp"] = reached
+    stages["handle_pregrasp_steps"] = steps
+    reached, steps = _servo_to_pose(env, handle_grasp, gripper=1.0, max_steps=30)
+    stages["reached_handle"] = stages["reached_handle_pregrasp"] and reached
+    stages["handle_reach_steps"] = steps
+    if stages["reached_handle"]:
+        _hold_gripper(env, gripper=-1.0, steps=14)
         tcp = base.agent.tcp.pose.sp
-        stages["retreat_completed"] = _move(
-            planner, sapien.Pose(tcp.p + np.array([0.0, 0.0, 0.08]), tcp.q)
+        pull_target = sapien.Pose(tcp.p + np.array([-0.19, 0.0, 0.0]), tcp.q)
+        moved, steps = _servo_to_pose(
+            env, pull_target, gripper=-1.0, max_steps=45, position_tolerance=0.018
         )
-        planner.open_gripper(t=8)
-        evaluation = base.evaluate()
-        for name in (
-            "success",
-            "ever_drawer_opened",
-            "ever_grasped",
-            "ever_lifted",
-            "object_in_target",
-            "object_released",
-            "is_robot_static",
-        ):
-            stages[name] = _scalar(evaluation[name])
-        stages["final_object_position"] = _vector(base.obj.pose.p, 3).tolist()
-        stages["target_position"] = _vector(base.target_tray.pose.p, 3).tolist()
-        return stages
-    finally:
-        planner.close()
+        stages["pull_motion_completed"] = moved
+        stages["pull_steps"] = steps
+    else:
+        stages["pull_motion_completed"] = False
+        stages["pull_steps"] = 0
+    stages["drawer_qpos_after_pull"] = float(_vector(base.drawer.get_qpos(), 1)[0])
+    stages["drawer_opened"] = stages["drawer_qpos_after_pull"] <= -0.16
+    _hold_gripper(env, gripper=1.0, steps=10)
+
+    object_matrix = base.obj.pose.to_transformation_matrix()[0].cpu().numpy()
+    object_center = object_matrix[:3, 3]
+    object_closing = object_matrix[:3, 1]
+    object_grasp = _top_down_grasp(base, object_center, object_closing)
+    reached, steps = _servo_to_pose(
+        env, object_grasp * sapien.Pose([0.0, 0.0, -0.075]), gripper=1.0
+    )
+    stages["reached_object_pregrasp"] = reached
+    stages["object_pregrasp_steps"] = steps
+    reached, steps = _servo_to_pose(env, object_grasp, gripper=1.0, max_steps=30)
+    stages["reached_object"] = stages["reached_object_pregrasp"] and reached
+    stages["object_reach_steps"] = steps
+    if stages["reached_object"]:
+        grasped, close_steps = _close_until_object_grasped(env, base)
+    else:
+        grasped, close_steps = False, 0
+    stages["object_grasped"] = grasped
+    stages["object_close_steps"] = close_steps
+
+    initial_object_z = float(_vector(base.obj.pose.p, 3)[2])
+    stages["initial_object_z"] = initial_object_z
+    if grasped:
+        object_in_tcp = base.agent.tcp.pose.sp.inv() * base.obj.pose.sp
+        held = base.obj.pose.sp
+        lifted_object = sapien.Pose(held.p + np.array([0.0, 0.0, 0.13]), held.q)
+        moved, steps = _servo_to_pose(
+            env, lifted_object * object_in_tcp.inv(), gripper=-1.0
+        )
+        stages["lift_motion_completed"] = moved
+        stages["lift_steps"] = steps
+    else:
+        stages["lift_motion_completed"] = False
+        stages["lift_steps"] = 0
+    lifted_z = float(_vector(base.obj.pose.p, 3)[2])
+    stages["lifted_object_z"] = lifted_z
+    stages["object_lifted"] = (
+        stages["lift_motion_completed"]
+        and _scalar(base.agent.is_grasping(base.obj))
+        and lifted_z - initial_object_z >= 0.08
+    )
+
+    if stages["object_lifted"]:
+        object_in_tcp = base.agent.tcp.pose.sp.inv() * base.obj.pose.sp
+        target_xy = _vector(base.target_tray.pose.p, 3)[:2]
+        current_object = base.obj.pose.sp
+        above_target = sapien.Pose([target_xy[0], target_xy[1], 0.15], current_object.q)
+        moved, steps = _servo_to_pose(
+            env, above_target * object_in_tcp.inv(), gripper=-1.0, max_steps=50
+        )
+        stages["transport_completed"] = moved
+        stages["transport_steps"] = steps
+        place_target = sapien.Pose([target_xy[0], target_xy[1], 0.043], base.obj.pose.sp.q)
+        moved, steps = _servo_to_pose(
+            env, place_target * object_in_tcp.inv(), gripper=-1.0, max_steps=35
+        )
+        stages["place_motion_completed"] = stages["transport_completed"] and moved
+        stages["place_steps"] = steps
+    else:
+        stages["transport_completed"] = False
+        stages["transport_steps"] = 0
+        stages["place_motion_completed"] = False
+        stages["place_steps"] = 0
+
+    _hold_gripper(env, gripper=1.0, steps=14)
+    tcp = base.agent.tcp.pose.sp
+    moved, steps = _servo_to_pose(
+        env,
+        sapien.Pose(tcp.p + np.array([0.0, 0.0, 0.08]), tcp.q),
+        gripper=1.0,
+        max_steps=30,
+    )
+    stages["retreat_completed"] = moved
+    stages["retreat_steps"] = steps
+    _hold_gripper(env, gripper=1.0, steps=8)
+    evaluation = base.evaluate()
+    for name in (
+        "success",
+        "ever_drawer_opened",
+        "ever_grasped",
+        "ever_lifted",
+        "object_in_target",
+        "object_released",
+        "is_robot_static",
+    ):
+        stages[name] = _scalar(evaluation[name])
+    stages["final_object_position"] = _vector(base.obj.pose.p, 3).tolist()
+    stages["target_position"] = _vector(base.target_tray.pose.p, 3).tolist()
+    return stages
 
 
 def parse_args() -> argparse.Namespace:
@@ -208,7 +242,7 @@ def main() -> None:
         env = gym.make(
             ENV_IDS[split],
             obs_mode="none",
-            control_mode="pd_joint_pos",
+            control_mode="pd_ee_pose",
             render_mode="rgb_array",
             sim_backend="cpu",
         )
