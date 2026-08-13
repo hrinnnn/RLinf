@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,53 @@ def _top_down_grasp(base, center: np.ndarray, closing: np.ndarray):
     )
 
 
+class PandaPosePlannerClient:
+    def __init__(self):
+        server = Path(__file__).with_name("panda_pose_planner_server.py")
+        self.process = subprocess.Popen(
+            [sys.executable, "-u", str(server)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+        if self.process.stdout is None or self.process.stdin is None:
+            raise RuntimeError("failed to create planner pipes")
+        while True:
+            line = self.process.stdout.readline()
+            if not line:
+                raise RuntimeError("planner exited before becoming ready")
+            if line.strip() == "READY":
+                break
+
+    def plan(self, target_world, qpos: np.ndarray, time_step: float) -> np.ndarray | None:
+        assert self.process.stdin is not None and self.process.stdout is not None
+        request = {
+            "target_p": np.asarray(target_world.p).tolist(),
+            "target_q": np.asarray(target_world.q).tolist(),
+            "qpos": np.asarray(qpos).tolist(),
+            "time_step": float(time_step),
+        }
+        self.process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+        self.process.stdin.flush()
+        while True:
+            line = self.process.stdout.readline()
+            if not line:
+                raise RuntimeError("planner exited while handling a request")
+            if line.startswith("RESULT "):
+                response = json.loads(line[len("RESULT ") :])
+                if response["status"] != "Success":
+                    return None
+                return np.asarray(response["positions"], dtype=np.float32)
+
+    def close(self) -> None:
+        if self.process.poll() is None and self.process.stdin is not None:
+            self.process.stdin.write('{"command":"close"}\n')
+            self.process.stdin.flush()
+        self.process.wait(timeout=30)
+
+
 def _move_to_pose(
     env,
     planner,
@@ -49,27 +97,10 @@ def _move_to_pose(
     position_tolerance: float = 0.012,
 ) -> tuple[bool, int]:
     base = env.unwrapped
-    planning_pose = planner._transform_pose_for_planning(target_world)
-    target = np.concatenate(
-        [_vector(planning_pose.p, 3), _vector(planning_pose.q, 4)]
-    )
     qpos = _vector(base.agent.robot.get_qpos(), 9)
-    result = planner.planner.plan_screw(
-        target,
-        qpos,
-        time_step=float(base.control_timestep),
-        use_point_cloud=False,
-    )
-    if result.get("status") != "Success":
-        result = planner.planner.plan_qpos_to_pose(
-            target,
-            qpos,
-            time_step=float(base.control_timestep),
-            wrt_world=True,
-        )
-    if result.get("status") != "Success":
+    positions = planner.plan(target_world, qpos, float(base.control_timestep))
+    if positions is None:
         return False, 0
-    positions = np.asarray(result["position"], dtype=np.float32)
     for position in positions:
         env.step(np.concatenate([position[:7], [gripper]]).astype(np.float32))
     position_error = np.linalg.norm(
@@ -246,9 +277,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     import gymnasium as gym
-    from mani_skill.examples.motionplanning.panda.motionplanner import (
-        PandaArmMotionPlanningSolver,
-    )
     from mani_skill.utils.wrappers.record import RecordEpisode
 
     import rlinf.envs.maniskill.open_drawer_retrieve_place  # noqa: F401
@@ -261,26 +289,7 @@ def main() -> None:
     for split_index, split in enumerate(splits):
         split_dir = args.output_dir / split
         split_dir.mkdir()
-        # MPLib must be initialized before the custom articulation exists in
-        # the process. It supplies only robot joint paths; physics still runs
-        # in the real drawer environment below.
-        proxy_env = gym.make(
-            "PickCube-v1",
-            obs_mode="none",
-            control_mode="pd_joint_pos",
-            render_mode=None,
-            sim_backend="cpu",
-        )
-        proxy_env.reset(seed=0)
-        proxy_base = proxy_env.unwrapped
-        planner = PandaArmMotionPlanningSolver(
-            proxy_env,
-            debug=False,
-            vis=False,
-            base_pose=proxy_base.agent.robot.pose,
-            visualize_target_grasp_pose=False,
-            print_env_info=False,
-        )
+        planner = PandaPosePlannerClient()
         env = gym.make(
             ENV_IDS[split],
             obs_mode="none",
@@ -309,7 +318,6 @@ def main() -> None:
         finally:
             env.close()
             planner.close()
-            proxy_env.close()
         successes = sum(bool(record["success"]) for record in records)
         summary = {
             "split": split,
