@@ -200,4 +200,7 @@ def register_uncover_sphere_place_variants() -> None:
             (UncoverSpherePlaceEnv,),
             {"rlinf_split": split},
         )
-        register_env(env_id, max_episode_steps=160)(cls)
+        # The task contains two sequential manipulation stages.  The oracle
+        # replans short action chunks, so the horizon must cover both stages
+        # rather than truncating after the cover-removal phase.
+        register_env(env_id, max_episode_steps=500)(cls)
