@@ -41,10 +41,16 @@ def _top_down_grasp(base, center: np.ndarray, closing: np.ndarray):
 
 
 def _pose_action(base, target_world, gripper: float) -> np.ndarray:
-    from transforms3d.euler import quat2euler
-
     target_at_base = base.agent.robot.pose.sp.inv() * target_world
-    euler = quat2euler(np.asarray(target_at_base.q), axes="sxyz")
+    w, x, y, z = np.asarray(target_at_base.q, dtype=np.float64)
+    euler = np.array(
+        [
+            np.arctan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)),
+            np.arcsin(np.clip(2 * (w * y - z * x), -1.0, 1.0)),
+            np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)),
+        ],
+        dtype=np.float64,
+    )
     return np.asarray([*target_at_base.p, *euler, gripper], dtype=np.float32)
 
 
