@@ -70,7 +70,7 @@ class UncoverSpherePlaceEnv(BaseEnv):
         self.table_scene.build()
         self.mug = actors.build_box(
             self.scene, half_sizes=MUG_HALF_SIZE, color=[0.72, 0.42, 0.16, 1],
-            name="cover_mug", body_type="kinematic",
+            name="cover_mug", body_type="dynamic",
         )
         self.sphere = actors.build_sphere(
             self.scene, radius=SPHERE_RADIUS, color=[0.12, 0.25, 0.85, 1],
