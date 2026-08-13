@@ -32,7 +32,7 @@ UNCOVER_ENV_IDS = {
 }
 
 TABLE_Z = 0.02
-MUG_HALF_SIZE = (0.045, 0.035, 0.04)
+MUG_HALF_SIZE = (0.045, 0.035, 0.02)
 SPHERE_RADIUS = 0.018
 BOWL_RADIUS = 0.065
 PARKING_XY = np.array([-0.16, 0.16], dtype=np.float32)
@@ -114,7 +114,9 @@ class UncoverSpherePlaceEnv(BaseEnv):
             sphere_p[env_idx, :2] = xy
             sphere_p[env_idx, 2] = TABLE_Z + SPHERE_RADIUS
             mug_p[env_idx, :2] = xy
-            mug_p[env_idx, 2] = TABLE_Z + MUG_HALF_SIZE[2]
+            # The cover rests just above the sphere rather than intersecting
+            # it at reset; the sphere remains physically recoverable.
+            mug_p[env_idx, 2] = TABLE_Z + 2 * SPHERE_RADIUS + MUG_HALF_SIZE[2]
             bowl_xy = torch.tensor([0.16, -0.05], dtype=sphere_p.dtype, device=self.device)
             if self.rlinf_split == "goal_ood":
                 bowl_xy = torch.tensor([0.16, 0.10], dtype=sphere_p.dtype, device=self.device)
