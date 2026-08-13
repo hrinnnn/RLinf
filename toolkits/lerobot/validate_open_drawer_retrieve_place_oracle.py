@@ -98,31 +98,11 @@ def _close_until_object_grasped(env, base, *, max_steps: int = 24, stable_steps:
     return False, max_steps
 
 
-def solve_episode(env, seed: int) -> dict[str, Any]:
-    import gymnasium as gym
+def solve_episode(env, seed: int, planner) -> dict[str, Any]:
     import sapien
-    from mani_skill.examples.motionplanning.panda.motionplanner import (
-        PandaArmMotionPlanningSolver,
-    )
 
     env.reset(seed=seed)
     base = env.unwrapped
-    proxy_env = gym.make(
-        "PickCube-v1",
-        obs_mode="none",
-        control_mode="pd_joint_pos",
-        render_mode=None,
-        sim_backend="cpu",
-    )
-    proxy_env.reset(seed=0)
-    planner = PandaArmMotionPlanningSolver(
-        proxy_env,
-        debug=False,
-        vis=False,
-        base_pose=base.agent.robot.pose,
-        visualize_target_grasp_pose=False,
-        print_env_info=False,
-    )
     stages: dict[str, Any] = {"seed": int(seed), "split": base.rlinf_split}
     handle_center = _vector(base.handle_world_position, 3)
     handle_grasp = _top_down_grasp(base, handle_center, np.array([1.0, 0.0, 0.0]))
@@ -247,8 +227,6 @@ def solve_episode(env, seed: int) -> dict[str, Any]:
         stages[name] = _scalar(evaluation[name])
     stages["final_object_position"] = _vector(base.obj.pose.p, 3).tolist()
     stages["target_position"] = _vector(base.target_tray.pose.p, 3).tolist()
-    planner.close()
-    proxy_env.close()
     return stages
 
 
@@ -268,6 +246,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     import gymnasium as gym
+    from mani_skill.examples.motionplanning.panda.motionplanner import (
+        PandaArmMotionPlanningSolver,
+    )
     from mani_skill.utils.wrappers.record import RecordEpisode
 
     import rlinf.envs.maniskill.open_drawer_retrieve_place  # noqa: F401
@@ -280,6 +261,26 @@ def main() -> None:
     for split_index, split in enumerate(splits):
         split_dir = args.output_dir / split
         split_dir.mkdir()
+        # MPLib must be initialized before the custom articulation exists in
+        # the process. It supplies only robot joint paths; physics still runs
+        # in the real drawer environment below.
+        proxy_env = gym.make(
+            "PickCube-v1",
+            obs_mode="none",
+            control_mode="pd_joint_pos",
+            render_mode=None,
+            sim_backend="cpu",
+        )
+        proxy_env.reset(seed=0)
+        proxy_base = proxy_env.unwrapped
+        planner = PandaArmMotionPlanningSolver(
+            proxy_env,
+            debug=False,
+            vis=False,
+            base_pose=proxy_base.agent.robot.pose,
+            visualize_target_grasp_pose=False,
+            print_env_info=False,
+        )
         env = gym.make(
             ENV_IDS[split],
             obs_mode="none",
@@ -299,7 +300,7 @@ def main() -> None:
         try:
             for offset in range(args.num_seeds):
                 seed = args.start_seed + split_index * 10000 + offset
-                record = solve_episode(env, seed)
+                record = solve_episode(env, seed, planner)
                 records.append(record)
                 with (split_dir / "episodes.jsonl").open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(record, sort_keys=True) + "\n")
@@ -307,6 +308,8 @@ def main() -> None:
                     env.flush_video(save=True)
         finally:
             env.close()
+            planner.close()
+            proxy_env.close()
         successes = sum(bool(record["success"]) for record in records)
         summary = {
             "split": split,
