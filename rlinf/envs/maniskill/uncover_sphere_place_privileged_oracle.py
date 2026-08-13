@@ -64,6 +64,23 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         self._cover_attempts = 0
         self._sphere_attempts = 0
 
+    def resume_from_current_state(self, phase: str) -> None:
+        """Resume planning from an already-created physical intermediate state.
+
+        This is used by the oracle audit and by stage-localized data collection:
+        the simulator state is preserved, while planner-local cached poses are
+        deliberately discarded so the next plan is derived from live actors.
+        """
+        allowed = {"cover_reach", "sphere_reach", "sphere_lift"}
+        if phase not in allowed:
+            raise ValueError(f"unsupported resume phase: {phase}")
+        self._phase = phase
+        self._cover_grasp_pose = None
+        self._sphere_grasp_pose = None
+        self._object_to_tcp = None
+        self._cover_attempts = 0
+        self._sphere_attempts = 0
+
     @staticmethod
     def _at_pose(tcp_pose: Any, target_pose: Any, tolerance: float = 0.025) -> bool:
         return float(

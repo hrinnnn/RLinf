@@ -151,6 +151,33 @@ class UncoverSpherePlaceEnv(BaseEnv):
             )
         return obs
 
+    def reset_metadata(self) -> dict[str, Any]:
+        """Return auditable metadata for the current reset/state."""
+        cover_q = self.mug.pose.q[0].detach().cpu()
+        cover_yaw = 2.0 * float(torch.atan2(cover_q[3], cover_q[0]))
+        return {
+            "task": "UncoverSpherePlace",
+            "split": self.rlinf_split,
+            "object_id": "target_sphere",
+            "cover_id": "cover_mug",
+            "target_id": "target_bowl",
+            "sphere_position": self.sphere.pose.p.detach().cpu().tolist(),
+            "sphere_quaternion": self.sphere.pose.q.detach().cpu().tolist(),
+            "cover_position": self.mug.pose.p.detach().cpu().tolist(),
+            "cover_quaternion": self.mug.pose.q.detach().cpu().tolist(),
+            "target_position": self.bowl.pose.p.detach().cpu().tolist(),
+            "target_quaternion": self.bowl.pose.q.detach().cpu().tolist(),
+            "stage_factors": {
+                "cover_yaw": cover_yaw,
+                "target_xy": self.bowl.pose.p[0, :2].detach().cpu().tolist(),
+            },
+            "success_definition": {
+                "cover_parked": "cover entered the parking zone",
+                "sphere_grasped": "sphere was grasped at least once",
+                "sphere_in_bowl": "released sphere is within the bowl and static",
+            },
+        }
+
     def evaluate(self):
         mug_parked = torch.linalg.norm(self.mug.pose.p[:, :2] - torch.tensor(
             PARKING_XY, dtype=self.mug.pose.p.dtype, device=self.device
