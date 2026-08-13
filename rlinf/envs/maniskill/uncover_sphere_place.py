@@ -35,7 +35,7 @@ TABLE_Z = 0.02
 MUG_HALF_SIZE = (0.03, 0.025, 0.025)
 # A slightly larger sphere keeps the task visually simple while giving the
 # Panda gripper a stable contact margin for the privileged oracle and policy.
-SPHERE_RADIUS = 0.035
+SPHERE_RADIUS = 0.025
 BOWL_RADIUS = 0.065
 PARKING_XY = np.array([-0.16, 0.16], dtype=np.float32)
 
@@ -108,7 +108,9 @@ class UncoverSpherePlaceEnv(BaseEnv):
         with torch.device(self.device):
             self.table_scene.initialize(env_idx)
             b = len(env_idx)
-            xy = self._batched_episode_rng.uniform(-0.035, 0.035, size=(b, 2))
+            # Keep the paired nuisance variation small enough that the
+            # official Panda planner has a stable workspace margin.
+            xy = self._batched_episode_rng.uniform(-0.02, 0.02, size=(b, 2))
             xy = torch.as_tensor(xy, dtype=self.sphere.pose.p.dtype, device=self.device)
             sphere_p = self.sphere.pose.p.clone()
             mug_p = self.mug.pose.p.clone()

@@ -103,10 +103,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             obb,
             approaching=approaching,
             target_closing=closing,
-            # Place the TCP at the live sphere center.  Using a fixed depth
-            # would move the grasp point above the center after the sphere
-            # radius is changed for this controlled task.
-            depth=SPHERE_RADIUS if "sphere" in str(getattr(actor, "name", "")) else 0.025,
+            depth=0.025,
         )
         # Use the live actor center.  For this box cover, the OBB helper's
         # approach-dependent center is offset from the physical center.
