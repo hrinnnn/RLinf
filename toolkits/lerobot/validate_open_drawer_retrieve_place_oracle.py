@@ -41,16 +41,15 @@ def _top_down_grasp(base, center: np.ndarray, closing: np.ndarray):
 
 
 def _pose_action(base, target_world, gripper: float) -> np.ndarray:
-    target_at_base = base.agent.robot.pose.sp.inv() * target_world
-    w, x, y, z = np.asarray(target_at_base.q, dtype=np.float64)
-    euler = np.array(
-        [
-            np.arctan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)),
-            np.arcsin(np.clip(2 * (w * y - z * x), -1.0, 1.0)),
-            np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)),
-        ],
-        dtype=np.float64,
+    import torch
+    from mani_skill.utils.geometry.rotation_conversions import (
+        matrix_to_euler_angles,
+        quaternion_to_matrix,
     )
+
+    target_at_base = base.agent.robot.pose.sp.inv() * target_world
+    quaternion = torch.as_tensor(np.asarray(target_at_base.q), dtype=torch.float32)[None]
+    euler = matrix_to_euler_angles(quaternion_to_matrix(quaternion), "XYZ")[0].numpy()
     return np.asarray([*target_at_base.p, *euler, gripper], dtype=np.float32)
 
 
