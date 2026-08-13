@@ -43,6 +43,7 @@ from toolkits.lerobot.collect_maniskill_pick_single_ycb_airplane_lerobot import 
 )
 from toolkits.lerobot.validate_open_drawer_retrieve_place_oracle import (  # noqa: E402
     PandaPosePlannerClient,
+    _jsonable,
     solve_episode,
 )
 
@@ -103,7 +104,7 @@ def _run_reference(env: Any, seed: int, planner: PandaPosePlannerClient):
             return None
         metadata["oracle"] = {
             "type": "privileged_panda_motion_planning",
-            "stages": stages,
+            "stages": _jsonable(stages),
         }
         return records, actions, dict(metadata)
     finally:
