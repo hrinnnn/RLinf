@@ -232,13 +232,21 @@ def solve_episode(env, seed: int, planner) -> dict[str, Any]:
         current_object = base.obj.pose.sp
         above_target = sapien.Pose([target_xy[0], target_xy[1], 0.15], current_object.q)
         moved, steps = _move_to_pose(
-            env, planner, above_target * object_in_tcp.inv(), gripper=-1.0
+            env,
+            planner,
+            above_target * object_in_tcp.inv(),
+            gripper=-1.0,
+            position_tolerance=0.035,
         )
         stages["transport_completed"] = moved
         stages["transport_steps"] = steps
         place_target = sapien.Pose([target_xy[0], target_xy[1], 0.043], base.obj.pose.sp.q)
         moved, steps = _move_to_pose(
-            env, planner, place_target * object_in_tcp.inv(), gripper=-1.0
+            env,
+            planner,
+            place_target * object_in_tcp.inv(),
+            gripper=-1.0,
+            position_tolerance=0.035,
         )
         stages["place_motion_completed"] = stages["transport_completed"] and moved
         stages["place_steps"] = steps
@@ -308,7 +316,7 @@ def main() -> None:
             ENV_IDS[split],
             obs_mode="none",
             control_mode="pd_joint_pos",
-            render_mode="rgb_array",
+            render_mode="rgb_array" if args.save_video else None,
             sim_backend="cpu",
         )
         env = RecordEpisode(
