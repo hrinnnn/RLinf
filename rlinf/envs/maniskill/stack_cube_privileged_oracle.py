@@ -60,6 +60,20 @@ class StackCubePrivilegedChunkOracle:
         self._phase = "reach"
         self._grasp_pose: Any | None = None
 
+    def initialize_from_state(self, env: Any) -> str:
+        """Enter the earliest safe phase that matches the takeover state."""
+        base = env.unwrapped
+        grasped = bool(_as_numpy(base.agent.is_grasping(base.cubeA)).reshape(-1)[0])
+        cube_z = float(_first_vector(base.cubeA.pose.p, 3)[2])
+        if grasped and cube_z >= 0.07:
+            self._phase = "align"
+        elif grasped:
+            self._phase = "lift"
+        else:
+            self._phase = "reach"
+            self._grasp_pose = None
+        return self._phase
+
     @staticmethod
     def _at_pose(tcp_pose: Any, target_pose: Any, tolerance: float = 0.025) -> bool:
         return (
