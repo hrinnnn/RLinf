@@ -26,7 +26,10 @@ from rlinf.algorithms.awbc import (
 from rlinf.config import SupportedModel
 from rlinf.data.awbc import attach_awbc_to_openpi_dataloader
 from rlinf.data.lerobot_paths import resolve_lerobot_repo_id
-from rlinf.data.openpi_mixture import attach_source_balanced_openpi_dataloader
+from rlinf.data.openpi_mixture import (
+    MaskPreservingOpenPIDataLoader,
+    attach_source_balanced_openpi_dataloader,
+)
 from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.utils.utils import get_rng_state, set_rng_state
 from rlinf.workers.sft.fsdp_sft_worker import FSDPSftWorker
@@ -111,26 +114,13 @@ class FSDPVlaSftWorker(FSDPSftWorker):
                     self._openpi_pytorch_dataloader(loader).dataset
                     for loader in data_loaders
                 ]
-                if bool(self.cfg.data.get("openpi_exclude_padded_action_targets", False)):
-                    from rlinf.data.openpi_mixture import ValidActionHorizonDataset
-
-                    action_horizon = int(self.cfg.data.get("openpi_valid_action_horizon", 0))
-                    if action_horizon <= 0:
-                        raise ValueError(
-                            "data.openpi_valid_action_horizon must be positive when "
-                            "excluding padded OpenPI action targets"
-                        )
-                    source_datasets = [
-                        ValidActionHorizonDataset(
-                            dataset, action_horizon=action_horizon
-                        )
-                        for dataset in source_datasets
-                    ]
                 data_loader = attach_source_balanced_openpi_dataloader(
                     data_loader,
                     datasets=source_datasets,
                     seed=int(self.cfg.actor.get("seed", 0)) + self._rank,
                 )
+            if not eval_dataset:
+                data_loader = MaskPreservingOpenPIDataLoader(data_loader)
             return data_loader, data_loader.data_config()
         elif SupportedModel(self.cfg.actor.model.model_type) in [
             SupportedModel.LINGBOTVLA

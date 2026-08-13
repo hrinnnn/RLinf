@@ -398,12 +398,17 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             self.gradient_checkpointing_disable()
 
         if isinstance(data, tuple):
-            observation, actions = data
+            if len(data) == 3:
+                observation, actions, action_valid_mask = data
+            else:
+                observation, actions = data
+                action_valid_mask = None
             awbc_weight = None
         else:
             observation = data["observation"]
             actions = data["actions"]
             awbc_weight = data.get("awbc_weight")
+            action_valid_mask = data.get("action_valid_mask")
 
         device = next(self.parameters()).device
         register_pytree_dataclasses(observation)
@@ -430,16 +435,26 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             loss = super().forward(observation, actions)
         if use_action_chunk_loss:
             loss = loss[:, : self.config.action_chunk, : self.config.action_env_dim]
+        element_mask = None
+        valid_action_ratio = None
+        if action_valid_mask is not None:
+            element_mask = torch.as_tensor(
+                action_valid_mask, device=loss.device, dtype=loss.dtype
+            )
+            valid_action_ratio = element_mask.float().mean()
         vla_loss, per_sample_vla_loss = weighted_flow_matching_loss(
-            loss, awbc_weight
+            loss, awbc_weight, element_mask=element_mask
         )
         if not self.config.use_rlt:
-            if awbc_weight is not None:
-                return {
+            if awbc_weight is not None or valid_action_ratio is not None:
+                output = {
                     "loss": vla_loss,
                     "vla_loss": vla_loss,
                     "awbc_unweighted_vla_loss": per_sample_vla_loss.mean(),
                 }
+                if valid_action_ratio is not None:
+                    output["valid_action_ratio"] = valid_action_ratio
+                return output
             return vla_loss
 
         rlt_param = next(self.rlt_module.parameters())

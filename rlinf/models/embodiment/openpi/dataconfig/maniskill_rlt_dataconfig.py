@@ -46,6 +46,7 @@ class LeRobotRLTManiSkillJointDataConfig(DataConfigFactory):
             "observation/wrist_image": self.wrist_image_key,
             "observation/state": self.state_key,
             "actions": self.action_key,
+            "actions_is_pad": "actions_is_pad",
         }
         if self.prompt_key is not None:
             repack_structure["prompt"] = self.prompt_key

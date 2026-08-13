@@ -37,6 +37,18 @@ def _parse_image(image) -> np.ndarray:
     return image
 
 
+def action_valid_mask_from_padding(actions_is_pad) -> np.ndarray:
+    """Convert LeRobot's temporal padding flags to a boolean validity mask."""
+
+    padding = np.asarray(actions_is_pad, dtype=bool)
+    if padding.ndim == 0:
+        raise ValueError("actions_is_pad must contain a temporal dimension")
+    valid = np.logical_not(padding)
+    if not np.any(valid):
+        raise ValueError("an action anchor must retain at least one real action")
+    return valid
+
+
 @dataclasses.dataclass(frozen=True)
 class ManiSkillInputs(transforms.DataTransformFn):
     """
@@ -97,6 +109,13 @@ class ManiSkillInputs(transforms.DataTransformFn):
         # Actions are only available during training.
         if "actions" in data:
             inputs["actions"] = data["actions"]
+        if "actions_is_pad" in data:
+            # LeRobot clamps out-of-episode action indices to the final real
+            # action. Preserve every observation anchor and expose the inverse
+            # flag to the flow-matching loss.
+            inputs["action_valid_mask"] = action_valid_mask_from_padding(
+                data["actions_is_pad"]
+            )
 
         # Pass the prompt (aka language instruction) to the model.
         # Keep this for your own dataset (but modify the key if the instruction is not

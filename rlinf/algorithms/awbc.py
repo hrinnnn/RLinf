@@ -345,17 +345,41 @@ def compute_flux_awbc_weights(
 
 
 def weighted_flow_matching_loss(
-    element_loss: torch.Tensor, sample_weights: torch.Tensor | None = None
+    element_loss: torch.Tensor,
+    sample_weights: torch.Tensor | None = None,
+    element_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reduce PI0 per-element flow loss, optionally using per-sample weights."""
+    """Reduce PI0 per-element flow loss with optional sample/element masks.
+
+    ``element_mask`` is used for temporal action padding. It is broadcast to
+    ``element_loss`` and the per-sample mean is normalized by valid elements,
+    so repeated terminal actions do not affect the loss.
+    """
 
     if element_loss.ndim == 0:
         raise ValueError("element_loss must include a batch dimension")
-    per_sample = (
-        element_loss
-        if element_loss.ndim == 1
-        else element_loss.reshape(element_loss.shape[0], -1).mean(dim=1)
-    )
+    if element_mask is not None:
+        mask = torch.as_tensor(
+            element_mask, device=element_loss.device, dtype=element_loss.dtype
+        )
+        while mask.ndim < element_loss.ndim:
+            mask = mask.unsqueeze(-1)
+        try:
+            mask = mask.expand_as(element_loss)
+        except RuntimeError as exc:
+            raise ValueError(
+                "element_mask must be broadcastable to element_loss"
+            ) from exc
+        flat_loss = element_loss.reshape(element_loss.shape[0], -1)
+        flat_mask = mask.reshape(mask.shape[0], -1)
+        valid_count = flat_mask.sum(dim=1).clamp_min(1.0)
+        per_sample = (flat_loss * flat_mask).sum(dim=1) / valid_count
+    else:
+        per_sample = (
+            element_loss
+            if element_loss.ndim == 1
+            else element_loss.reshape(element_loss.shape[0], -1).mean(dim=1)
+        )
     if sample_weights is None:
         return per_sample.mean(), per_sample
 

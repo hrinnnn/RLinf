@@ -15,48 +15,25 @@ import torch
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler
 
 
-class ValidActionHorizonDataset(Dataset):
-    """Expose only starts with an entirely in-episode action target.
+class MaskPreservingOpenPIDataLoader:
+    """Expose LeRobot temporal padding metadata to the RLinf SFT worker."""
 
-    LeRobot clamps future action indices at episode boundaries and emits an
-    ``actions_is_pad`` flag.  OpenPI's transformed sample deliberately drops
-    that flag, so ordinary flow-matching SFT would otherwise optimize against
-    repeated terminal actions.  This wrapper filters those starts before a
-    batch reaches the model.
-    """
+    def __init__(self, openpi_data_loader: Any):
+        self._openpi_data_loader = openpi_data_loader
 
-    def __init__(self, dataset: Dataset, *, action_horizon: int):
-        if action_horizon <= 0:
-            raise ValueError("action_horizon must be positive")
-        self.dataset = dataset
-        self.action_horizon = int(action_horizon)
-        raw_dataset = dataset
-        while hasattr(raw_dataset, "_dataset"):
-            raw_dataset = raw_dataset._dataset
-        episode_index = getattr(raw_dataset, "episode_data_index", None)
-        if episode_index is None or "from" not in episode_index or "to" not in episode_index:
-            raise TypeError(
-                "valid action-horizon filtering requires a LeRobot-style "
-                "dataset with episode_data_index"
-            )
+    def data_config(self):
+        return self._openpi_data_loader.data_config()
 
-        valid_indices: list[int] = []
-        for start, end in zip(episode_index["from"], episode_index["to"], strict=True):
-            start = int(start)
-            end = int(end)
-            # ``end`` is exclusive.  An anchor at i needs actions i..i+H-1.
-            valid_indices.extend(range(start, max(start, end - self.action_horizon + 1)))
-        if not valid_indices:
-            raise ValueError(
-                f"no episode contains a complete {self.action_horizon}-step action target"
-            )
-        self.raw_indices = tuple(valid_indices)
+    def __getattr__(self, name: str):
+        return getattr(self._openpi_data_loader, name)
 
-    def __len__(self) -> int:
-        return len(self.raw_indices)
+    def __iter__(self):
+        from openpi.models import model as _model
 
-    def __getitem__(self, index: int) -> Any:
-        return self.dataset[self.raw_indices[index]]
+        torch_loader = self._openpi_data_loader._data_loader
+        for batch in torch_loader:
+            observation = _model.Observation.from_dict(batch)
+            yield observation, batch["actions"], batch.get("action_valid_mask")
 
 
 class SourceBalancedBatchSampler(Sampler[list[int]]):
