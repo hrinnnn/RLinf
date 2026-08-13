@@ -300,6 +300,170 @@ def solve_episode(env, seed: int, planner) -> dict[str, Any]:
     return stages
 
 
+def continue_episode(env, planner, *, seed: int | None = None) -> dict[str, Any]:
+    """Finish an episode from its current state after an expert takeover.
+
+    This deliberately does not reset the environment.  The next action is
+    selected from observable task predicates, so a takeover after drawer
+    opening or after object grasping skips work that has already happened.
+    """
+
+    import sapien
+
+    base = env.unwrapped
+    stages: dict[str, Any] = {
+        "seed": None if seed is None else int(seed),
+        "split": base.rlinf_split,
+        "takeover_from_current_state": True,
+    }
+    drawer_opened = _scalar(
+        _vector(base.drawer.get_qpos(), 1)[0] <= DRAWER_OPEN_THRESHOLD * -1.0
+    )
+    stages["drawer_opened_before_takeover"] = drawer_opened
+
+    if not drawer_opened:
+        handle_center = _vector(base.handle_world_position, 3)
+        handle_grasp = _top_down_grasp(base, handle_center, np.array([0.0, 1.0, 0.0]))
+        reached, steps = _move_to_pose(
+            env,
+            planner,
+            handle_grasp * sapien.Pose([0.0, 0.0, -0.075]),
+            gripper=1.0,
+        )
+        stages["reached_handle_pregrasp"] = reached
+        stages["handle_pregrasp_steps"] = steps
+        reached, steps = _move_to_pose(env, planner, handle_grasp, gripper=1.0)
+        stages["reached_handle"] = stages["reached_handle_pregrasp"] and reached
+        stages["handle_reach_steps"] = steps
+        if stages["reached_handle"]:
+            _hold_gripper(env, gripper=-1.0, steps=14)
+            tcp = base.agent.tcp.pose.sp
+            pull_target = sapien.Pose(tcp.p + np.array([-0.37, 0.0, 0.0]), tcp.q)
+            moved, steps = _move_to_pose(
+                env, planner, pull_target, gripper=-1.0, position_tolerance=0.018
+            )
+            stages["pull_motion_completed"] = moved
+            stages["pull_steps"] = steps
+        else:
+            stages["pull_motion_completed"] = False
+            stages["pull_steps"] = 0
+
+    drawer_opened = bool(
+        _vector(base.drawer.get_qpos(), 1)[0] <= -DRAWER_OPEN_THRESHOLD
+    )
+    stages["drawer_opened_after_takeover"] = drawer_opened
+    if not drawer_opened:
+        stages["success"] = False
+        return stages
+
+    grasped = _scalar(base.agent.is_grasping(base.obj))
+    stages["object_grasped_before_takeover"] = grasped
+    if not grasped:
+        _hold_gripper(env, gripper=1.0, steps=10)
+        tcp = base.agent.tcp.pose.sp
+        moved, steps = _move_to_pose(
+            env,
+            planner,
+            sapien.Pose(tcp.p + np.array([0.0, 0.0, 0.15]), tcp.q),
+            gripper=1.0,
+        )
+        stages["handle_retreat_completed"] = moved
+        stages["handle_retreat_steps"] = steps
+
+        object_matrix = base.obj.pose.to_transformation_matrix()[0].cpu().numpy()
+        object_center = object_matrix[:3, 3]
+        object_closing = object_matrix[:3, 1]
+        object_grasp = _top_down_grasp(base, object_center, object_closing)
+        reached, steps = _move_to_pose(
+            env,
+            planner,
+            object_grasp * sapien.Pose([0.0, 0.0, -0.140]),
+            gripper=1.0,
+            position_tolerance=0.025,
+        )
+        stages["reached_object_pregrasp"] = reached
+        stages["object_pregrasp_steps"] = steps
+        reached, steps = _move_to_pose(env, planner, object_grasp, gripper=1.0)
+        stages["reached_object"] = stages["reached_object_pregrasp"] and reached
+        stages["object_reach_steps"] = steps
+        if stages["reached_object"]:
+            grasped, close_steps = _close_until_object_grasped(env, base)
+        else:
+            grasped, close_steps = False, 0
+        stages["object_close_steps"] = close_steps
+
+    stages["object_grasped_after_takeover"] = bool(grasped)
+    initial_object_z = float(_vector(base.obj.pose.p, 3)[2])
+    already_lifted = grasped and initial_object_z >= 0.12
+    if grasped and not already_lifted:
+        object_in_tcp = base.agent.tcp.pose.sp.inv() * base.obj.pose.sp
+        lifted_object = sapien.Pose(
+            base.obj.pose.sp.p + np.array([0.0, 0.0, 0.13]), base.obj.pose.sp.q
+        )
+        moved, steps = _move_to_pose(
+            env, planner, lifted_object * object_in_tcp.inv(), gripper=-1.0
+        )
+        stages["lift_motion_completed"] = moved
+        stages["lift_steps"] = steps
+    lifted = already_lifted or (
+        _scalar(base.agent.is_grasping(base.obj))
+        and float(_vector(base.obj.pose.p, 3)[2]) - initial_object_z >= 0.08
+    )
+    stages["object_lifted_after_takeover"] = lifted
+    if not lifted:
+        stages["success"] = False
+        return stages
+
+    object_in_tcp = base.agent.tcp.pose.sp.inv() * base.obj.pose.sp
+    target_xy = _vector(base.target_tray.pose.p, 3)[:2]
+    current_object = base.obj.pose.sp
+    above_target = sapien.Pose([target_xy[0], target_xy[1], 0.15], current_object.q)
+    moved, steps = _move_to_pose(
+        env,
+        planner,
+        above_target * object_in_tcp.inv(),
+        gripper=-1.0,
+        position_tolerance=0.035,
+    )
+    stages["transport_completed"] = moved
+    stages["transport_steps"] = steps
+    place_target = sapien.Pose([target_xy[0], target_xy[1], 0.043], base.obj.pose.sp.q)
+    moved, steps = _move_to_pose(
+        env,
+        planner,
+        place_target * object_in_tcp.inv(),
+        gripper=-1.0,
+        position_tolerance=0.035,
+    )
+    stages["place_motion_completed"] = stages["transport_completed"] and moved
+    stages["place_steps"] = steps
+    _hold_gripper(env, gripper=1.0, steps=14)
+    tcp = base.agent.tcp.pose.sp
+    moved, steps = _move_to_pose(
+        env,
+        planner,
+        sapien.Pose(tcp.p + np.array([0.0, 0.0, 0.08]), tcp.q),
+        gripper=1.0,
+    )
+    stages["retreat_completed"] = moved
+    stages["retreat_steps"] = steps
+    _hold_gripper(env, gripper=1.0, steps=8)
+    evaluation = base.evaluate()
+    for name in (
+        "success",
+        "ever_drawer_opened",
+        "ever_grasped",
+        "ever_lifted",
+        "object_in_target",
+        "object_released",
+        "is_robot_static",
+    ):
+        stages[name] = _scalar(evaluation[name])
+    stages["final_object_position"] = _vector(base.obj.pose.p, 3).tolist()
+    stages["target_position"] = _vector(base.target_tray.pose.p, 3).tolist()
+    return stages
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
