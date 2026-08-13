@@ -20,6 +20,7 @@ class UncoverSpherePlaceOraclePlan:
     planning_succeeded: bool
     joint_targets: np.ndarray | None = None
     gripper: float = 1.0
+    joint_delta_limit: float = 0.1
 
     def action_at(self, qpos: Any, step_index: int) -> np.ndarray:
         if self.joint_targets is None:
@@ -28,8 +29,8 @@ class UncoverSpherePlaceOraclePlan:
         target = self.joint_targets[min(step_index, len(self.joint_targets) - 1)]
         arm = _normalize_delta(
             target[:7] - current[:7],
-            np.full(7, -0.1, dtype=np.float32),
-            np.full(7, 0.1, dtype=np.float32),
+            np.full(7, -self.joint_delta_limit, dtype=np.float32),
+            np.full(7, self.joint_delta_limit, dtype=np.float32),
         )
         return np.concatenate([arm.astype(np.float32), [self.gripper]])
 
@@ -399,6 +400,12 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         targets = np.asarray([path[index, :7] for index in indices], dtype=np.float32)
         actions = np.zeros((self.chunk_size, 8), dtype=np.float32)
         actions[:, -1] = gripper
+        delta_limit = 0.05 if phase in {"sphere_lift", "sphere_move", "sphere_place"} else 0.1
         return UncoverSpherePlaceOraclePlan(
-            actions, phase, True, joint_targets=targets, gripper=gripper
+            actions,
+            phase,
+            True,
+            joint_targets=targets,
+            gripper=gripper,
+            joint_delta_limit=delta_limit,
         )
