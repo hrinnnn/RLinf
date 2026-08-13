@@ -105,7 +105,7 @@ class OpenDrawerRetrievePlaceEnv(BaseEnv):
         self._add_box(
             drawer,
             center=(HANDLE_LOCAL_X, self.handle_lateral_offset, HANDLE_LOCAL_Z),
-            half_size=(0.018, 0.050, 0.012),
+            half_size=(0.018, 0.025, 0.012),
             color=(0.88, 0.72, 0.18),
             density=900.0,
         )

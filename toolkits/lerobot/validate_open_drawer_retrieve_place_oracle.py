@@ -150,7 +150,7 @@ def solve_episode(env, seed: int, planner) -> dict[str, Any]:
     base = env.unwrapped
     stages: dict[str, Any] = {"seed": int(seed), "split": base.rlinf_split}
     handle_center = _vector(base.handle_world_position, 3)
-    handle_grasp = _top_down_grasp(base, handle_center, np.array([1.0, 0.0, 0.0]))
+    handle_grasp = _top_down_grasp(base, handle_center, np.array([0.0, 1.0, 0.0]))
     reached, steps = _move_to_pose(
         env,
         planner,
