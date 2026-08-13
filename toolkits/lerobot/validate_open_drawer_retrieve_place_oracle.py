@@ -17,6 +17,11 @@ RLINF_ROOT = Path(__file__).resolve().parents[2]
 if str(RLINF_ROOT) not in sys.path:
     sys.path.insert(0, str(RLINF_ROOT))
 
+from rlinf.envs.maniskill.open_drawer_retrieve_place_spec import (
+    DRAWER_OPEN_THRESHOLD,
+    ENV_IDS,
+)
+
 
 def _scalar(value: Any) -> bool:
     if hasattr(value, "detach"):
@@ -179,8 +184,19 @@ def solve_episode(env, seed: int, planner) -> dict[str, Any]:
         stages["pull_motion_completed"] = False
         stages["pull_steps"] = 0
     stages["drawer_qpos_after_pull"] = float(_vector(base.drawer.get_qpos(), 1)[0])
-    stages["drawer_opened"] = stages["drawer_qpos_after_pull"] <= -0.16
+    stages["drawer_opened"] = (
+        stages["drawer_qpos_after_pull"] <= -DRAWER_OPEN_THRESHOLD
+    )
     _hold_gripper(env, gripper=1.0, steps=10)
+    tcp = base.agent.tcp.pose.sp
+    moved, steps = _move_to_pose(
+        env,
+        planner,
+        sapien.Pose(tcp.p + np.array([0.0, 0.0, 0.15]), tcp.q),
+        gripper=1.0,
+    )
+    stages["handle_retreat_completed"] = moved
+    stages["handle_retreat_steps"] = steps
 
     object_matrix = base.obj.pose.to_transformation_matrix()[0].cpu().numpy()
     object_center = object_matrix[:3, 3]
@@ -302,8 +318,6 @@ def main() -> None:
     from mani_skill.utils.wrappers.record import RecordEpisode
 
     import rlinf.envs.maniskill.open_drawer_retrieve_place  # noqa: F401
-    from rlinf.envs.maniskill.open_drawer_retrieve_place_spec import ENV_IDS
-
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=False)
     splits = tuple(ENV_IDS) if args.split == "all" else (args.split,)
