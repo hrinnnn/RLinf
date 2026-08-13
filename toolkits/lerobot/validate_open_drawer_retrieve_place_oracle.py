@@ -165,7 +165,7 @@ def solve_episode(env, seed: int, planner) -> dict[str, Any]:
     if stages["reached_handle"]:
         _hold_gripper(env, gripper=-1.0, steps=14)
         tcp = base.agent.tcp.pose.sp
-        pull_target = sapien.Pose(tcp.p + np.array([-0.19, 0.0, 0.0]), tcp.q)
+        pull_target = sapien.Pose(tcp.p + np.array([-0.29, 0.0, 0.0]), tcp.q)
         moved, steps = _move_to_pose(
             env,
             planner,
@@ -184,7 +184,6 @@ def solve_episode(env, seed: int, planner) -> dict[str, Any]:
 
     object_matrix = base.obj.pose.to_transformation_matrix()[0].cpu().numpy()
     object_center = object_matrix[:3, 3]
-    object_center[2] += 0.057
     object_closing = object_matrix[:3, 1]
     object_grasp = _top_down_grasp(base, object_center, object_closing)
     reached, steps = _move_to_pose(
