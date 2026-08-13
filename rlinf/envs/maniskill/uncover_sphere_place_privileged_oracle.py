@@ -132,10 +132,16 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             # A sphere has no preferred yaw.  Trying a different in-plane
             # finger orientation after a failed grasp avoids repeating the
             # same marginal contact caused by the preceding cover motion.
-            official_angles = np.arange(0.0, np.pi * 2 / 3, np.pi / 2) + np.pi / 4
-            official_angles = np.repeat(official_angles, 2)
-            official_angles[1::2] *= -1
-            angles = tuple(np.roll(official_angles, -attempt % len(official_angles)))
+            if getattr(base, "rlinf_split", "id") == "handle_ood":
+                # The rotated cover leaves a different sphere/tcp contact
+                # geometry.  The axis-aligned candidate is the stable first
+                # contact for this stage-local split.
+                angles = (0.0, np.pi / 2, -np.pi / 2, np.pi)
+            else:
+                official_angles = np.arange(0.0, np.pi * 2 / 3, np.pi / 2) + np.pi / 4
+                official_angles = np.repeat(official_angles, 2)
+                official_angles[1::2] *= -1
+                angles = tuple(np.roll(official_angles, -attempt % len(official_angles)))
         candidates = [
             nominal * sapien.Pose(q=euler2quat(0, 0, angle))
             for angle in angles
