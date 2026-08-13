@@ -62,6 +62,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         self._sphere_grasp_pose: Any | None = None
         self._object_to_tcp: Any | None = None
         self._cover_attempts = 0
+        self._sphere_attempts = 0
 
     @staticmethod
     def _at_pose(tcp_pose: Any, target_pose: Any, tolerance: float = 0.025) -> bool:
@@ -90,7 +91,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             joint_acc_limits=0.5,
         )
 
-    def _find_grasp_pose(self, env: Any, actor: Any) -> Any:
+    def _find_grasp_pose(self, env: Any, actor: Any, *, attempt: int = 0) -> Any:
         solver_cls, compute_grasp, get_obb, sapien = _load_symbols()
         base = env.unwrapped
         obb = get_obb(actor)
@@ -126,9 +127,15 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             joint_vel_limits=0.5,
             joint_acc_limits=0.5,
         )
+        angles = (0.0, np.pi / 2, -np.pi / 2, np.pi)
+        if "sphere" in str(getattr(actor, "name", "")):
+            # A sphere has no preferred yaw.  Trying a different in-plane
+            # finger orientation after a failed grasp avoids repeating the
+            # same marginal contact caused by the preceding cover motion.
+            angles = tuple(np.roll(np.asarray(angles), -attempt % len(angles)))
         candidates = [
             nominal * sapien.Pose(q=euler2quat(0, 0, angle))
-            for angle in (0.0, np.pi / 2, -np.pi / 2, np.pi)
+            for angle in angles
         ]
         for candidate in candidates:
             if self._plan_path(env, candidate, solver=solver) is not None:
@@ -246,7 +253,9 @@ class UncoverSpherePlacePrivilegedChunkOracle:
 
         if self._phase == "sphere_reach":
             if self._sphere_grasp_pose is None:
-                self._sphere_grasp_pose = self._find_grasp_pose(env, base.sphere)
+                self._sphere_grasp_pose = self._find_grasp_pose(
+                    env, base.sphere, attempt=self._sphere_attempts
+                )
             reach = self._sphere_grasp_pose * sapien.Pose([0, 0, -0.04])
             if self._at_pose(base.agent.tcp.pose.sp, reach):
                 self._phase = "sphere_grasp"
@@ -267,12 +276,14 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             if bool(np.asarray(base.agent.is_grasping(base.sphere)).reshape(-1)[0]):
                 self._phase = "sphere_lift"
             else:
+                self._sphere_attempts += 1
                 self._phase = "sphere_reach"
                 self._sphere_grasp_pose = None
                 return self._target(env)
 
         if self._phase in {"sphere_lift", "sphere_move", "sphere_place"}:
             if not bool(np.asarray(base.agent.is_grasping(base.sphere)).reshape(-1)[0]):
+                self._sphere_attempts += 1
                 self._phase = "sphere_reach"
                 self._sphere_grasp_pose = None
                 return self._target(env)
