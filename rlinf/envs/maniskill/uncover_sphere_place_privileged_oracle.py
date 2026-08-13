@@ -312,7 +312,10 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             actions = np.zeros((self.chunk_size, 8), dtype=np.float32)
             actions[:, -1] = gripper
             return UncoverSpherePlaceOraclePlan(actions, phase, False, gripper=gripper)
-        indices = np.linspace(0, len(path) - 1, num=self.chunk_size, dtype=np.int64)
+        # Keep the path prefix instead of compressing the complete motion into
+        # ten points.  Delta-position control needs the intermediate waypoints
+        # to settle a precise grasp; the next chunk replans from the live state.
+        indices = np.minimum(np.arange(self.chunk_size), len(path) - 1)
         targets = np.asarray([path[index, :7] for index in indices], dtype=np.float32)
         actions = np.zeros((self.chunk_size, 8), dtype=np.float32)
         actions[:, -1] = gripper
