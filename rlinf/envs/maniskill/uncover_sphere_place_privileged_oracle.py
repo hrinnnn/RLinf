@@ -63,6 +63,8 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         self._object_to_tcp: Any | None = None
         self._cover_attempts = 0
         self._sphere_attempts = 0
+        self._sphere_close_chunks = 0
+        self._sphere_stable_close_chunks = 0
 
     def resume_from_current_state(self, phase: str) -> None:
         """Resume planning from an already-created physical intermediate state.
@@ -80,6 +82,8 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         self._object_to_tcp = None
         self._cover_attempts = 0
         self._sphere_attempts = 0
+        self._sphere_close_chunks = 0
+        self._sphere_stable_close_chunks = 0
 
     @staticmethod
     def _at_pose(tcp_pose: Any, target_pose: Any, tolerance: float = 0.025) -> bool:
@@ -300,20 +304,28 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             if not self._at_pose(base.agent.tcp.pose.sp, self._sphere_grasp_pose):
                 return self._sphere_grasp_pose, 1.0, "sphere_grasp"
             self._phase = "sphere_close"
+            self._sphere_close_chunks = 0
+            self._sphere_stable_close_chunks = 0
 
         if self._phase == "sphere_close":
-            self._phase = "sphere_settle"
-            return None, -1.0, "sphere_close"
-
-        if self._phase == "sphere_settle":
-            if bool(np.asarray(base.agent.is_grasping(base.sphere)).reshape(-1)[0]):
-                self._phase = "sphere_lift"
+            self._sphere_close_chunks += 1
+            grasped = bool(np.asarray(base.agent.is_grasping(base.sphere)).reshape(-1)[0])
+            if grasped:
+                self._sphere_stable_close_chunks += 1
             else:
+                self._sphere_stable_close_chunks = 0
+            if self._sphere_stable_close_chunks >= 2:
+                self._phase = "sphere_lift"
+            elif self._sphere_close_chunks > 3:
                 self._sphere_attempts += 1
                 self._phase = "sphere_reach"
                 self._sphere_grasp_pose = None
                 self._object_to_tcp = None
+                self._sphere_close_chunks = 0
+                self._sphere_stable_close_chunks = 0
                 return self._target(env)
+            else:
+                return None, -1.0, "sphere_close"
 
         if self._phase in {"sphere_lift", "sphere_move", "sphere_place"}:
             if not bool(np.asarray(base.agent.is_grasping(base.sphere)).reshape(-1)[0]):
