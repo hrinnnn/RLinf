@@ -28,5 +28,5 @@ def env(grasped: bool, cube_z: float):
 def test_takeover_initializes_from_current_grasp_stage() -> None:
     oracle = StackCubePrivilegedChunkOracle()
     assert oracle.initialize_from_state(env(False, 0.02)) == "reach"
-    assert oracle.initialize_from_state(env(True, 0.05)) == "lift"
-    assert oracle.initialize_from_state(env(True, 0.08)) == "align"
+    assert oracle.initialize_from_state(env(True, 0.05)) == "close"
+    assert oracle.initialize_from_state(env(True, 0.08)) == "close"

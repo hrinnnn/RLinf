@@ -65,10 +65,10 @@ class StackCubePrivilegedChunkOracle:
         base = env.unwrapped
         grasped = bool(_as_numpy(base.agent.is_grasping(base.cubeA)).reshape(-1)[0])
         cube_z = float(_first_vector(base.cubeA.pose.p, 3)[2])
-        if grasped and cube_z >= 0.07:
-            self._phase = "align"
-        elif grasped:
-            self._phase = "lift"
+        if grasped:
+            # Policy grasps may satisfy the predicate before the fingers have
+            # fully settled. Reinforce closure before any lift or lateral move.
+            self._phase = "close"
         else:
             self._phase = "reach"
             self._grasp_pose = None
