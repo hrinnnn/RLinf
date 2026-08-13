@@ -102,7 +102,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             obb,
             approaching=approaching,
             target_closing=closing,
-            depth=0.025,
+            depth=0.012 if "sphere" in str(getattr(actor, "name", "")) else 0.025,
         )
         # Use the live actor center.  For this box cover, the OBB helper's
         # approach-dependent center is offset from the physical center.
@@ -184,7 +184,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             self._cover_grasp_pose = self._find_grasp_pose(env, base.mug)
             if not self._at_pose(base.agent.tcp.pose.sp, self._cover_grasp_pose):
                 return self._cover_grasp_pose, 1.0, "cover_grasp"
-            self._phase = "cover_close"
+        self._phase = "cover_close"
 
         if self._phase == "cover_close":
             # Check grasp only after this closing chunk has been executed.
@@ -257,8 +257,16 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             self._phase = "sphere_close"
 
         if self._phase == "sphere_close":
-            self._phase = "sphere_lift"
+            self._phase = "sphere_settle"
             return None, -1.0, "sphere_close"
+
+        if self._phase == "sphere_settle":
+            if bool(np.asarray(base.agent.is_grasping(base.sphere)).reshape(-1)[0]):
+                self._phase = "sphere_lift"
+            else:
+                self._phase = "sphere_reach"
+                self._sphere_grasp_pose = None
+                return self._target(env)
 
         if self._phase in {"sphere_lift", "sphere_move", "sphere_place"}:
             sphere_pose = self._pose_from_actor(base.sphere, sapien)
