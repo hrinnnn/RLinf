@@ -184,7 +184,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             self._cover_grasp_pose = self._find_grasp_pose(env, base.mug)
             if not self._at_pose(base.agent.tcp.pose.sp, self._cover_grasp_pose):
                 return self._cover_grasp_pose, 1.0, "cover_grasp"
-        self._phase = "cover_close"
+            self._phase = "cover_close"
 
         if self._phase == "cover_close":
             # Check grasp only after this closing chunk has been executed.
