@@ -203,4 +203,4 @@ def register_uncover_sphere_place_variants() -> None:
         # The task contains two sequential manipulation stages.  The oracle
         # replans short action chunks, so the horizon must cover both stages
         # rather than truncating after the cover-removal phase.
-        register_env(env_id, max_episode_steps=1000)(cls)
+        register_env(env_id, max_episode_steps=2500)(cls)
