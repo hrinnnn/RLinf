@@ -300,7 +300,7 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=False)
     splits = tuple(ENV_IDS) if args.split == "all" else (args.split,)
     combined: dict[str, Any] = {}
-    for split_index, split in enumerate(splits):
+    for split in splits:
         split_dir = args.output_dir / split
         split_dir.mkdir()
         planner = PandaPosePlannerClient()
@@ -322,7 +322,7 @@ def main() -> None:
         records = []
         try:
             for offset in range(args.num_seeds):
-                seed = args.start_seed + split_index * 10000 + offset
+                seed = args.start_seed + offset
                 record = _jsonable(solve_episode(env, seed, planner))
                 records.append(record)
                 with (split_dir / "episodes.jsonl").open("a", encoding="utf-8") as handle:
