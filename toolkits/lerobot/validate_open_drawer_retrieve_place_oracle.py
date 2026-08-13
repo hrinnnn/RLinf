@@ -31,6 +31,18 @@ def _vector(value: Any, length: int | None = None) -> np.ndarray:
     return result if length is None else result[:length]
 
 
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
 def _top_down_grasp(base, center: np.ndarray, closing: np.ndarray):
     closing = np.asarray(closing, dtype=np.float64)
     closing[2] = 0.0
@@ -311,7 +323,7 @@ def main() -> None:
         try:
             for offset in range(args.num_seeds):
                 seed = args.start_seed + split_index * 10000 + offset
-                record = solve_episode(env, seed, planner)
+                record = _jsonable(solve_episode(env, seed, planner))
                 records.append(record)
                 with (split_dir / "episodes.jsonl").open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(record, sort_keys=True) + "\n")
