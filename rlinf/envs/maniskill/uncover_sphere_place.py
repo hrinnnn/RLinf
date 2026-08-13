@@ -32,7 +32,7 @@ UNCOVER_ENV_IDS = {
 }
 
 TABLE_Z = 0.02
-MUG_HALF_SIZE = (0.045, 0.035, 0.02)
+MUG_HALF_SIZE = (0.05, 0.04, 0.03)
 SPHERE_RADIUS = 0.018
 BOWL_RADIUS = 0.065
 PARKING_XY = np.array([-0.16, 0.16], dtype=np.float32)
@@ -116,7 +116,7 @@ class UncoverSpherePlaceEnv(BaseEnv):
             mug_p[env_idx, :2] = xy
             # The cover rests just above the sphere rather than intersecting
             # it at reset; the sphere remains physically recoverable.
-            mug_p[env_idx, 2] = TABLE_Z + 2 * SPHERE_RADIUS + MUG_HALF_SIZE[2]
+            mug_p[env_idx, 2] = TABLE_Z + 2 * SPHERE_RADIUS + MUG_HALF_SIZE[2] + 0.004
             bowl_xy = torch.tensor([0.16, -0.05], dtype=sphere_p.dtype, device=self.device)
             if self.rlinf_split == "goal_ood":
                 bowl_xy = torch.tensor([0.16, 0.10], dtype=sphere_p.dtype, device=self.device)
@@ -178,6 +178,13 @@ class UncoverSpherePlaceEnv(BaseEnv):
             + info["sphere_in_bowl"].float()
             + info["success"].float()
         )
+
+    def compute_normalized_dense_reward(
+        self, obs: Any, action: torch.Tensor, info: dict
+    ):
+        # The phase predicates are already bounded event indicators; retaining
+        # the same scale keeps reward and evaluation semantics aligned.
+        return self.compute_dense_reward(obs, action, info)
 
 
 def register_uncover_sphere_place_variants() -> None:

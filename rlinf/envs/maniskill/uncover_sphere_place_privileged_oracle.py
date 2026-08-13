@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+from transforms3d.euler import euler2quat
 
 from .peg_privileged_oracle import _as_numpy, _first_vector, _normalize_delta
 from .uncover_sphere_place import BOWL_RADIUS, MUG_HALF_SIZE, PARKING_XY, SPHERE_RADIUS, TABLE_Z
@@ -89,7 +90,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         )
 
     def _find_grasp_pose(self, env: Any, actor: Any) -> Any:
-        _solver_cls, compute_grasp, get_obb, sapien = _load_symbols()
+        solver_cls, compute_grasp, get_obb, sapien = _load_symbols()
         base = env.unwrapped
         obb = get_obb(actor)
         approaching = np.array([0.0, 0.0, -1.0])
@@ -102,12 +103,35 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             target_closing=closing,
             depth=0.025,
         )
-        return base.agent.build_grasp_pose(
+        nominal = base.agent.build_grasp_pose(
             approaching, grasp["closing"], grasp["center"]
         )
+        # A cover is wider than a sphere and its stable grasp depends on the
+        # yaw of the fingers. Select the first candidate for which the
+        # official planner finds a collision-free path.
+        solver = solver_cls(
+            env,
+            debug=False,
+            vis=False,
+            base_pose=base.agent.robot.pose,
+            visualize_target_grasp_pose=False,
+            print_env_info=False,
+            joint_vel_limits=0.5,
+            joint_acc_limits=0.5,
+        )
+        candidates = [
+            nominal * sapien.Pose(q=euler2quat(0, 0, angle))
+            for angle in (0.0, np.pi / 2, -np.pi / 2, np.pi)
+        ]
+        for candidate in candidates:
+            if self._plan_path(env, candidate, solver=solver) is not None:
+                return candidate
+        return nominal
 
-    def _plan_path(self, env: Any, target_pose: Any) -> np.ndarray | None:
-        solver = self._planner(env)
+    def _plan_path(
+        self, env: Any, target_pose: Any, *, solver: Any | None = None
+    ) -> np.ndarray | None:
+        solver = solver or self._planner(env)
         base = env.unwrapped
         pose = solver._transform_pose_for_planning(target_pose)
         target = np.concatenate([_first_vector(pose.p, 3), _first_vector(pose.q, 4)])
