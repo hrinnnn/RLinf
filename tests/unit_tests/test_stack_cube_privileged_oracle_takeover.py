@@ -30,3 +30,8 @@ def test_takeover_initializes_from_current_grasp_stage() -> None:
     assert oracle.initialize_from_state(env(False, 0.02)) == "reach"
     assert oracle.initialize_from_state(env(True, 0.05)) == "close"
     assert oracle.initialize_from_state(env(True, 0.08)) == "close"
+
+
+def test_stable_grasp_hint_overrides_transient_grasp_predicate() -> None:
+    oracle = StackCubePrivilegedChunkOracle()
+    assert oracle.initialize_from_state(env(False, 0.08), grasped_hint=True) == "close"
