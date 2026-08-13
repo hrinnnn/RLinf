@@ -194,7 +194,13 @@ def solve_episode(env, seed: int, planner) -> dict[str, Any]:
     )
     stages["reached_object_pregrasp"] = reached
     stages["object_pregrasp_steps"] = steps
-    reached, steps = _move_to_pose(env, planner, object_grasp, gripper=1.0)
+    reached, steps = _move_to_pose(
+        env,
+        planner,
+        object_grasp,
+        gripper=1.0,
+        position_tolerance=0.025,
+    )
     stages["reached_object"] = stages["reached_object_pregrasp"] and reached
     stages["object_reach_steps"] = steps
     if stages["reached_object"]:
