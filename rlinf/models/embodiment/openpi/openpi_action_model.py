@@ -438,10 +438,25 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         element_mask = None
         valid_action_ratio = None
         if action_valid_mask is not None:
-            element_mask = torch.as_tensor(
+            temporal_mask = torch.as_tensor(
                 action_valid_mask, device=loss.device, dtype=loss.dtype
             )
-            valid_action_ratio = element_mask.float().mean()
+            if temporal_mask.ndim == loss.ndim - 1:
+                temporal_mask = temporal_mask.unsqueeze(-1)
+            elif temporal_mask.ndim != loss.ndim:
+                raise ValueError(
+                    "action_valid_mask must have one temporal dimension or match "
+                    f"the per-element loss shape, got {tuple(temporal_mask.shape)} "
+                    f"for loss shape {tuple(loss.shape)}"
+                )
+            action_env_dim = min(
+                int(getattr(self.config, "action_env_dim", loss.shape[-1])),
+                loss.shape[-1],
+            )
+            dimension_mask = torch.zeros_like(loss)
+            dimension_mask[..., :action_env_dim] = 1
+            element_mask = temporal_mask * dimension_mask
+            valid_action_ratio = temporal_mask.float().mean()
         vla_loss, per_sample_vla_loss = weighted_flow_matching_loss(
             loss, awbc_weight, element_mask=element_mask
         )
