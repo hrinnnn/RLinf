@@ -127,13 +127,11 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             target_closing=closing,
             depth=0.025,
         )
-        # The box cover needs its live geometric center because its OBB
-        # surface offset is unstable under yaw. For the sphere, preserve the
-        # official ManiSkill grasp center returned by the OBB helper.
-        if "sphere" in str(getattr(actor, "name", "")):
-            actor_center = grasp["center"]
-        else:
-            actor_center = _first_vector(actor.pose.p, 3)
+        # Match the official ManiSkill Panda examples: the OBB helper selects
+        # the closing direction, while the grasp pose is anchored at the
+        # live actor center. The helper's ``center`` is a surface reference
+        # used by the geometry routine, not the TCP center for this controller.
+        actor_center = _first_vector(actor.pose.p, 3)
         nominal = base.agent.build_grasp_pose(
             approaching, grasp["closing"], actor_center
         )
