@@ -227,19 +227,21 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         if self._phase == "cover_settle":
             if bool(np.asarray(base.agent.is_grasping(base.mug)).reshape(-1)[0]):
                 self._phase = "cover_lift"
-            else:
-                self._cover_attempts += 1
-                if self._cover_attempts > 3:
-                    self._phase = "failed"
                 else:
-                    self._phase = "cover_reach"
-                    self._cover_grasp_pose = None
-                    return self._target(env)
+                    self._cover_attempts += 1
+                    if self._cover_attempts > 3:
+                        self._phase = "failed"
+                    else:
+                        self._phase = "cover_reach"
+                        self._cover_grasp_pose = None
+                        self._object_to_tcp = None
+                        return self._target(env)
 
         if self._phase in {"cover_lift", "cover_move", "cover_place"}:
             if not bool(np.asarray(base.agent.is_grasping(base.mug)).reshape(-1)[0]):
                 self._phase = "cover_reach"
                 self._cover_grasp_pose = None
+                self._object_to_tcp = None
                 return self._target(env)
             mug_pose = self._pose_from_actor(base.mug, sapien)
             if self._phase == "cover_lift":
@@ -302,6 +304,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
                 self._sphere_attempts += 1
                 self._phase = "sphere_reach"
                 self._sphere_grasp_pose = None
+                self._object_to_tcp = None
                 return self._target(env)
 
         if self._phase in {"sphere_lift", "sphere_move", "sphere_place"}:
@@ -309,6 +312,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
                 self._sphere_attempts += 1
                 self._phase = "sphere_reach"
                 self._sphere_grasp_pose = None
+                self._object_to_tcp = None
                 return self._target(env)
             sphere_pose = self._pose_from_actor(base.sphere, sapien)
             if self._phase == "sphere_lift":
