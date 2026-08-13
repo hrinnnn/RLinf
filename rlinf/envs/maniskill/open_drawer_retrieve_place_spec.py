@@ -23,7 +23,7 @@ ENV_IDS: dict[TaskSplit, str] = {
 
 TASK_INSTRUCTION = "open the drawer, retrieve the blue object, and place it in the green tray"
 
-DRAWER_ORIGIN = np.array([0.13, 0.0, 0.0], dtype=np.float64)
+DRAWER_ORIGIN = np.array([0.28, 0.0, 0.0], dtype=np.float64)
 DRAWER_TRAVEL = 0.20
 DRAWER_OPEN_THRESHOLD = 0.16
 DRAWER_OBJECT_CENTER_LOCAL = np.array([0.025, 0.0], dtype=np.float64)
