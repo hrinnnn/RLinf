@@ -214,7 +214,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         if self._phase == "cover_grasp":
             assert self._cover_grasp_pose is not None
             self._cover_grasp_pose = self._find_grasp_pose(env, base.mug)
-            if not self._at_pose(base.agent.tcp.pose.sp, self._cover_grasp_pose):
+            if not self._at_pose(base.agent.tcp.pose.sp, self._cover_grasp_pose, tolerance=0.012):
                 return self._cover_grasp_pose, 1.0, "cover_grasp"
             self._phase = "cover_close"
 
@@ -292,7 +292,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             self._sphere_grasp_pose = self._find_grasp_pose(
                 env, base.sphere, attempt=self._sphere_attempts
             )
-            if not self._at_pose(base.agent.tcp.pose.sp, self._sphere_grasp_pose):
+            if not self._at_pose(base.agent.tcp.pose.sp, self._sphere_grasp_pose, tolerance=0.012):
                 return self._sphere_grasp_pose, 1.0, "sphere_grasp"
             self._phase = "sphere_close"
             self._sphere_close_chunks = 0
