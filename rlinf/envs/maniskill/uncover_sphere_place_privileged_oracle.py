@@ -61,6 +61,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         self._cover_grasp_pose: Any | None = None
         self._sphere_grasp_pose: Any | None = None
         self._object_to_tcp: Any | None = None
+        self._cover_attempts = 0
 
     @staticmethod
     def _at_pose(tcp_pose: Any, target_pose: Any, tolerance: float = 0.025) -> bool:
@@ -103,8 +104,11 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             target_closing=closing,
             depth=0.025,
         )
+        # Use the live actor center.  For this box cover, the OBB helper's
+        # approach-dependent center is offset from the physical center.
+        actor_center = _first_vector(actor.pose.p, 3)
         nominal = base.agent.build_grasp_pose(
-            approaching, grasp["closing"], grasp["center"]
+            approaching, grasp["closing"], actor_center
         )
         # A cover is wider than a sphere and its stable grasp depends on the
         # yaw of the fingers. Select the first candidate for which the
@@ -166,8 +170,9 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         base = env.unwrapped
 
         if self._phase == "cover_reach":
-            if self._cover_grasp_pose is None:
-                self._cover_grasp_pose = self._find_grasp_pose(env, base.mug)
+            # The dynamic cover can settle while the arm is approaching, so
+            # refresh the target from the live pose until grasp is acquired.
+            self._cover_grasp_pose = self._find_grasp_pose(env, base.mug)
             reach = self._cover_grasp_pose * sapien.Pose([0, 0, -0.05])
             if self._at_pose(base.agent.tcp.pose.sp, reach):
                 self._phase = "cover_grasp"
@@ -176,15 +181,28 @@ class UncoverSpherePlacePrivilegedChunkOracle:
 
         if self._phase == "cover_grasp":
             assert self._cover_grasp_pose is not None
+            self._cover_grasp_pose = self._find_grasp_pose(env, base.mug)
             if not self._at_pose(base.agent.tcp.pose.sp, self._cover_grasp_pose):
                 return self._cover_grasp_pose, 1.0, "cover_grasp"
             self._phase = "cover_close"
 
         if self._phase == "cover_close":
-            self._phase = "cover_lift"
+            if bool(np.asarray(base.agent.is_grasping(base.mug)).reshape(-1)[0]):
+                self._phase = "cover_lift"
+            else:
+                self._cover_attempts += 1
+                if self._cover_attempts > 3:
+                    self._phase = "failed"
+                else:
+                    self._phase = "cover_reach"
+                    self._cover_grasp_pose = None
             return None, -1.0, "cover_close"
 
         if self._phase in {"cover_lift", "cover_move", "cover_place"}:
+            if not bool(np.asarray(base.agent.is_grasping(base.mug)).reshape(-1)[0]):
+                self._phase = "cover_reach"
+                self._cover_grasp_pose = None
+                return self._target(env)
             mug_pose = self._pose_from_actor(base.mug, sapien)
             if self._phase == "cover_lift":
                 target_mug = sapien.Pose(
