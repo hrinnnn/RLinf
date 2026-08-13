@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -44,11 +45,12 @@ def _top_down_grasp(base, center: np.ndarray, closing: np.ndarray):
 class PandaPosePlannerClient:
     def __init__(self):
         server = Path(__file__).with_name("panda_pose_planner_server.py")
+        planner_python = os.environ.get("PANDA_PLANNER_PYTHON", sys.executable)
         self.process = subprocess.Popen(
-            [sys.executable, "-u", str(server)],
+            [planner_python, "-u", str(server)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=None,
             text=True,
             bufsize=1,
         )

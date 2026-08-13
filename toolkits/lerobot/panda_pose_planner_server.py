@@ -4,7 +4,13 @@
 from __future__ import annotations
 
 import json
+import os
+import site
 import sys
+
+external_site_packages = os.environ.get("PANDA_PLANNER_SITE_PACKAGES")
+if external_site_packages:
+    site.addsitedir(external_site_packages)
 
 import gymnasium as gym
 import numpy as np
