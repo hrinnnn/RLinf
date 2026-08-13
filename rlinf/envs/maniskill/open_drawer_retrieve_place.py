@@ -99,9 +99,9 @@ class OpenDrawerRetrievePlaceEnv(BaseEnv):
             damping=1.0,
         )
         self._add_box(drawer, center=(0, 0, 0.022), half_size=(0.13, 0.15, 0.012), color=(0.58, 0.48, 0.36), density=450.0)
-        self._add_box(drawer, center=(0, -0.142, 0.062), half_size=(0.13, 0.008, 0.052), color=(0.55, 0.45, 0.34), density=450.0)
-        self._add_box(drawer, center=(0, 0.142, 0.062), half_size=(0.13, 0.008, 0.052), color=(0.55, 0.45, 0.34), density=450.0)
-        self._add_box(drawer, center=(-0.13, 0, 0.075), half_size=(0.012, 0.15, 0.075), color=(0.50, 0.40, 0.30), density=450.0)
+        self._add_box(drawer, center=(0, -0.142, 0.037), half_size=(0.13, 0.008, 0.027), color=(0.55, 0.45, 0.34), density=450.0)
+        self._add_box(drawer, center=(0, 0.142, 0.037), half_size=(0.13, 0.008, 0.027), color=(0.55, 0.45, 0.34), density=450.0)
+        self._add_box(drawer, center=(-0.13, 0, 0.052), half_size=(0.012, 0.15, 0.042), color=(0.50, 0.40, 0.30), density=450.0)
         self._add_box(
             drawer,
             center=(HANDLE_LOCAL_X, self.handle_lateral_offset, HANDLE_LOCAL_Z),
