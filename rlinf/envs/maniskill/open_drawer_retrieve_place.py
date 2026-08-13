@@ -33,7 +33,7 @@ from rlinf.envs.maniskill.open_drawer_retrieve_place_spec import (
 
 OBJECT_HALF_SIZE = np.array([0.055, 0.024, 0.024], dtype=np.float64)
 TARGET_INNER_HALF_SIZE = np.array([0.075, 0.075], dtype=np.float64)
-HANDLE_LOCAL_X = -0.155
+HANDLE_LOCAL_X = -0.210
 HANDLE_LOCAL_Z = 0.095
 
 
