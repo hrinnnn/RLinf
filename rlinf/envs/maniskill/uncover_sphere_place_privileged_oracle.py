@@ -127,7 +127,10 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             joint_vel_limits=0.5,
             joint_acc_limits=0.5,
         )
-        angles = (0.0, np.pi / 2, -np.pi / 2, np.pi)
+        official_angles = np.arange(0.0, np.pi * 2 / 3, np.pi / 2) + np.pi / 4
+        official_angles = np.repeat(official_angles, 2)
+        official_angles[1::2] *= -1
+        angles = tuple(float(angle) for angle in official_angles)
         if "sphere" in str(getattr(actor, "name", "")):
             # A sphere has no preferred yaw.  Trying a different in-plane
             # finger orientation after a failed grasp avoids repeating the
