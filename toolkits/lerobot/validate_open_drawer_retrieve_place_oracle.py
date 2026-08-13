@@ -40,45 +40,49 @@ def _top_down_grasp(base, center: np.ndarray, closing: np.ndarray):
     )
 
 
-def _pose_action(base, target_world, gripper: float) -> np.ndarray:
-    import torch
-    from mani_skill.utils.geometry.rotation_conversions import (
-        matrix_to_euler_angles,
-        quaternion_to_matrix,
-    )
-
-    target_at_base = base.agent.robot.pose.sp.inv() * target_world
-    quaternion = torch.as_tensor(np.asarray(target_at_base.q), dtype=torch.float32)[None]
-    euler = matrix_to_euler_angles(quaternion_to_matrix(quaternion), "XYZ")[0].numpy()
-    return np.asarray([*target_at_base.p, *euler, gripper], dtype=np.float32)
-
-
-def _servo_to_pose(
+def _move_to_pose(
     env,
+    planner,
     target_world,
     *,
     gripper: float,
-    max_steps: int = 40,
     position_tolerance: float = 0.012,
 ) -> tuple[bool, int]:
     base = env.unwrapped
-    action = _pose_action(base, target_world, gripper)
-    for step in range(1, max_steps + 1):
-        env.step(action)
-        position_error = np.linalg.norm(
-            _vector(base.agent.tcp.pose.p, 3) - np.asarray(target_world.p)
+    planning_pose = planner._transform_pose_for_planning(target_world)
+    target = np.concatenate(
+        [_vector(planning_pose.p, 3), _vector(planning_pose.q, 4)]
+    )
+    qpos = _vector(base.agent.robot.get_qpos(), 9)
+    result = planner.planner.plan_screw(
+        target,
+        qpos,
+        time_step=float(base.control_timestep),
+        use_point_cloud=False,
+    )
+    if result.get("status") != "Success":
+        result = planner.planner.plan_qpos_to_pose(
+            target,
+            qpos,
+            time_step=float(base.control_timestep),
+            wrt_world=True,
         )
-        if position_error <= position_tolerance:
-            return True, step
-    return False, max_steps
+    if result.get("status") != "Success":
+        return False, 0
+    positions = np.asarray(result["position"], dtype=np.float32)
+    for position in positions:
+        env.step(np.concatenate([position[:7], [gripper]]).astype(np.float32))
+    position_error = np.linalg.norm(
+        _vector(base.agent.tcp.pose.p, 3) - np.asarray(target_world.p)
+    )
+    return position_error <= position_tolerance, len(positions)
 
 
 def _hold_gripper(env, *, gripper: float, steps: int) -> None:
     base = env.unwrapped
-    target = base.agent.tcp.pose.sp
-    action = _pose_action(base, target, gripper)
     for _ in range(steps):
-        env.step(action)
+        qpos = _vector(base.agent.robot.get_qpos(), 9)
+        env.step(np.concatenate([qpos[:7], [gripper]]).astype(np.float32))
 
 
 def _close_until_object_grasped(env, base, *, max_steps: int = 24, stable_steps: int = 3):
@@ -95,27 +99,54 @@ def _close_until_object_grasped(env, base, *, max_steps: int = 24, stable_steps:
 
 
 def solve_episode(env, seed: int) -> dict[str, Any]:
+    import gymnasium as gym
     import sapien
+    from mani_skill.examples.motionplanning.panda.motionplanner import (
+        PandaArmMotionPlanningSolver,
+    )
 
     env.reset(seed=seed)
     base = env.unwrapped
+    proxy_env = gym.make(
+        "PickCube-v1",
+        obs_mode="none",
+        control_mode="pd_joint_pos",
+        render_mode=None,
+        sim_backend="cpu",
+    )
+    proxy_env.reset(seed=0)
+    planner = PandaArmMotionPlanningSolver(
+        proxy_env,
+        debug=False,
+        vis=False,
+        base_pose=base.agent.robot.pose,
+        visualize_target_grasp_pose=False,
+        print_env_info=False,
+    )
     stages: dict[str, Any] = {"seed": int(seed), "split": base.rlinf_split}
     handle_center = _vector(base.handle_world_position, 3)
     handle_grasp = _top_down_grasp(base, handle_center, np.array([1.0, 0.0, 0.0]))
-    reached, steps = _servo_to_pose(
-        env, handle_grasp * sapien.Pose([0.0, 0.0, -0.075]), gripper=1.0
+    reached, steps = _move_to_pose(
+        env,
+        planner,
+        handle_grasp * sapien.Pose([0.0, 0.0, -0.075]),
+        gripper=1.0,
     )
     stages["reached_handle_pregrasp"] = reached
     stages["handle_pregrasp_steps"] = steps
-    reached, steps = _servo_to_pose(env, handle_grasp, gripper=1.0, max_steps=30)
+    reached, steps = _move_to_pose(env, planner, handle_grasp, gripper=1.0)
     stages["reached_handle"] = stages["reached_handle_pregrasp"] and reached
     stages["handle_reach_steps"] = steps
     if stages["reached_handle"]:
         _hold_gripper(env, gripper=-1.0, steps=14)
         tcp = base.agent.tcp.pose.sp
         pull_target = sapien.Pose(tcp.p + np.array([-0.19, 0.0, 0.0]), tcp.q)
-        moved, steps = _servo_to_pose(
-            env, pull_target, gripper=-1.0, max_steps=45, position_tolerance=0.018
+        moved, steps = _move_to_pose(
+            env,
+            planner,
+            pull_target,
+            gripper=-1.0,
+            position_tolerance=0.018,
         )
         stages["pull_motion_completed"] = moved
         stages["pull_steps"] = steps
@@ -130,12 +161,15 @@ def solve_episode(env, seed: int) -> dict[str, Any]:
     object_center = object_matrix[:3, 3]
     object_closing = object_matrix[:3, 1]
     object_grasp = _top_down_grasp(base, object_center, object_closing)
-    reached, steps = _servo_to_pose(
-        env, object_grasp * sapien.Pose([0.0, 0.0, -0.075]), gripper=1.0
+    reached, steps = _move_to_pose(
+        env,
+        planner,
+        object_grasp * sapien.Pose([0.0, 0.0, -0.075]),
+        gripper=1.0,
     )
     stages["reached_object_pregrasp"] = reached
     stages["object_pregrasp_steps"] = steps
-    reached, steps = _servo_to_pose(env, object_grasp, gripper=1.0, max_steps=30)
+    reached, steps = _move_to_pose(env, planner, object_grasp, gripper=1.0)
     stages["reached_object"] = stages["reached_object_pregrasp"] and reached
     stages["object_reach_steps"] = steps
     if stages["reached_object"]:
@@ -151,8 +185,8 @@ def solve_episode(env, seed: int) -> dict[str, Any]:
         object_in_tcp = base.agent.tcp.pose.sp.inv() * base.obj.pose.sp
         held = base.obj.pose.sp
         lifted_object = sapien.Pose(held.p + np.array([0.0, 0.0, 0.13]), held.q)
-        moved, steps = _servo_to_pose(
-            env, lifted_object * object_in_tcp.inv(), gripper=-1.0
+        moved, steps = _move_to_pose(
+            env, planner, lifted_object * object_in_tcp.inv(), gripper=-1.0
         )
         stages["lift_motion_completed"] = moved
         stages["lift_steps"] = steps
@@ -172,14 +206,14 @@ def solve_episode(env, seed: int) -> dict[str, Any]:
         target_xy = _vector(base.target_tray.pose.p, 3)[:2]
         current_object = base.obj.pose.sp
         above_target = sapien.Pose([target_xy[0], target_xy[1], 0.15], current_object.q)
-        moved, steps = _servo_to_pose(
-            env, above_target * object_in_tcp.inv(), gripper=-1.0, max_steps=50
+        moved, steps = _move_to_pose(
+            env, planner, above_target * object_in_tcp.inv(), gripper=-1.0
         )
         stages["transport_completed"] = moved
         stages["transport_steps"] = steps
         place_target = sapien.Pose([target_xy[0], target_xy[1], 0.043], base.obj.pose.sp.q)
-        moved, steps = _servo_to_pose(
-            env, place_target * object_in_tcp.inv(), gripper=-1.0, max_steps=35
+        moved, steps = _move_to_pose(
+            env, planner, place_target * object_in_tcp.inv(), gripper=-1.0
         )
         stages["place_motion_completed"] = stages["transport_completed"] and moved
         stages["place_steps"] = steps
@@ -191,11 +225,11 @@ def solve_episode(env, seed: int) -> dict[str, Any]:
 
     _hold_gripper(env, gripper=1.0, steps=14)
     tcp = base.agent.tcp.pose.sp
-    moved, steps = _servo_to_pose(
+    moved, steps = _move_to_pose(
         env,
+        planner,
         sapien.Pose(tcp.p + np.array([0.0, 0.0, 0.08]), tcp.q),
         gripper=1.0,
-        max_steps=30,
     )
     stages["retreat_completed"] = moved
     stages["retreat_steps"] = steps
@@ -213,6 +247,8 @@ def solve_episode(env, seed: int) -> dict[str, Any]:
         stages[name] = _scalar(evaluation[name])
     stages["final_object_position"] = _vector(base.obj.pose.p, 3).tolist()
     stages["target_position"] = _vector(base.target_tray.pose.p, 3).tolist()
+    planner.close()
+    proxy_env.close()
     return stages
 
 
@@ -247,7 +283,7 @@ def main() -> None:
         env = gym.make(
             ENV_IDS[split],
             obs_mode="none",
-            control_mode="pd_ee_pose",
+            control_mode="pd_joint_pos",
             render_mode="rgb_array",
             sim_backend="cpu",
         )
