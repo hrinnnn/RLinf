@@ -269,6 +269,10 @@ class UncoverSpherePlacePrivilegedChunkOracle:
                 return self._target(env)
 
         if self._phase in {"sphere_lift", "sphere_move", "sphere_place"}:
+            if not bool(np.asarray(base.agent.is_grasping(base.sphere)).reshape(-1)[0]):
+                self._phase = "sphere_reach"
+                self._sphere_grasp_pose = None
+                return self._target(env)
             sphere_pose = self._pose_from_actor(base.sphere, sapien)
             if self._phase == "sphere_lift":
                 target_sphere = sapien.Pose(
