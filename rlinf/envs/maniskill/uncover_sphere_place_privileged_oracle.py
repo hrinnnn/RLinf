@@ -187,6 +187,11 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             self._phase = "cover_close"
 
         if self._phase == "cover_close":
+            # Check grasp only after this closing chunk has been executed.
+            self._phase = "cover_settle"
+            return None, -1.0, "cover_close"
+
+        if self._phase == "cover_settle":
             if bool(np.asarray(base.agent.is_grasping(base.mug)).reshape(-1)[0]):
                 self._phase = "cover_lift"
             else:
@@ -196,7 +201,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
                 else:
                     self._phase = "cover_reach"
                     self._cover_grasp_pose = None
-            return None, -1.0, "cover_close"
+                    return self._target(env)
 
         if self._phase in {"cover_lift", "cover_move", "cover_place"}:
             if not bool(np.asarray(base.agent.is_grasping(base.mug)).reshape(-1)[0]):
