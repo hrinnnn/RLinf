@@ -392,10 +392,22 @@ class UncoverSpherePlacePrivilegedChunkOracle:
             actions = np.zeros((self.chunk_size, 8), dtype=np.float32)
             actions[:, -1] = gripper
             return UncoverSpherePlaceOraclePlan(actions, phase, False, gripper=gripper)
-        # Keep the path prefix instead of compressing the complete motion into
-        # ten points.  Delta-position control needs the intermediate waypoints
-        # to settle a precise grasp; the next chunk replans from the live state.
-        indices = np.minimum(np.arange(self.chunk_size), len(path) - 1)
+        # Preserve fine-grained waypoints for approach and grasp phases, where
+        # contact precision matters. Once an object is held, cover the full
+        # transport path in one chunk; replaying only its prefix can make a
+        # long transport take hundreds of replanning chunks.
+        transport_phase = phase in {
+            "cover_lift",
+            "cover_move",
+            "cover_place",
+            "sphere_lift",
+            "sphere_move",
+            "sphere_place",
+        }
+        if transport_phase:
+            indices = np.linspace(0, len(path) - 1, num=self.chunk_size, dtype=np.int64)
+        else:
+            indices = np.minimum(np.arange(self.chunk_size), len(path) - 1)
         targets = np.asarray([path[index, :7] for index in indices], dtype=np.float32)
         actions = np.zeros((self.chunk_size, 8), dtype=np.float32)
         actions[:, -1] = gripper
