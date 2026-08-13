@@ -21,6 +21,7 @@ from rlinf.envs.maniskill.open_drawer_retrieve_place_spec import (  # noqa: E402
 )
 from toolkits.lerobot.validate_open_drawer_retrieve_place_oracle import (  # noqa: E402
     PandaPosePlannerClient,
+    _jsonable,
     continue_episode,
     solve_episode,
 )
@@ -144,7 +145,7 @@ def main() -> None:
         "total": len(results),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    args.output.write_text(json.dumps(_jsonable(summary), indent=2, sort_keys=True) + "\n")
     if summary["successes"] != summary["total"]:
         raise SystemExit(1)
 
