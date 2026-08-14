@@ -123,12 +123,21 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         # press through its top face toward the sphere. The sphere itself is
         # still grasped with the standard top-down Panda approach.
         if "cover" in str(getattr(actor, "name", "")):
-            approaching = np.array([1.0, 0.0, 0.0])
+            # Grasp the cover across its narrow horizontal axis. The OOD
+            # variant rotates the cover by 90 degrees, so rotate the approach
+            # and closing directions with it instead of relying on a tied OBB
+            # axis choice that can close through the sphere.
+            if getattr(base, "rlinf_split", "id") == "handle_ood":
+                approaching = np.array([0.0, 1.0, 0.0])
+                closing = np.array([-1.0, 0.0, 0.0])
+            else:
+                approaching = np.array([1.0, 0.0, 0.0])
+                closing = np.array([0.0, 1.0, 0.0])
         else:
             approaching = np.array([0.0, 0.0, -1.0])
-        closing = _as_numpy(
-            base.agent.tcp.pose.to_transformation_matrix()[0, :3, 1]
-        )
+            closing = _as_numpy(
+                base.agent.tcp.pose.to_transformation_matrix()[0, :3, 1]
+            )
         grasp = compute_grasp(
             obb,
             approaching=approaching,
