@@ -152,11 +152,13 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         )
         angles = (0.0, np.pi / 2, -np.pi / 2, np.pi)
         if "sphere" in str(getattr(actor, "name", "")):
-            # The official Panda grasp construction already supplies the
-            # sphere's closing direction. Unlike a box cover, a sphere has no
-            # meaningful yaw; extra in-plane rotations can create an
-            # off-center squeeze and destabilize contact during closure.
-            angles = (0.0,)
+            # The sphere is rotationally symmetric, but the hand can still
+            # approach with different in-plane finger orientations. Keep the
+            # first attempt aligned with the official construction and use a
+            # different valid orientation only after a failed close.
+            sphere_angles = (0.0, np.pi / 2, -np.pi / 2, np.pi)
+            offset = int(attempt) % len(sphere_angles)
+            angles = sphere_angles[offset:] + sphere_angles[:offset]
         candidates = [
             nominal * sapien.Pose(q=euler2quat(0, 0, angle))
             for angle in angles
