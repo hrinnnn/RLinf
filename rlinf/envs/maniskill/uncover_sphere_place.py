@@ -135,6 +135,12 @@ class UncoverSpherePlaceEnv(BaseEnv):
             self.sphere.set_linear_velocity(torch.zeros_like(self.sphere.linear_velocity))
             self.sphere.set_angular_velocity(torch.zeros_like(self.sphere.angular_velocity))
             self.mug.set_pose(Pose.create_from_pq(mug_p, _yaw_quaternion(mug_yaw)))
+            # The cover starts suspended above the sphere. Keep it dynamically
+            # graspable, but disable gravity until the oracle has secured it;
+            # otherwise it falls onto the sphere before the first grasp.
+            self.mug.set_disable_gravity(True)
+            self.mug.set_linear_velocity(torch.zeros_like(self.mug.linear_velocity))
+            self.mug.set_angular_velocity(torch.zeros_like(self.mug.angular_velocity))
             self.bowl.set_pose(Pose.create_from_pq(bowl_p, self.bowl.pose.q.clone()))
             if not hasattr(self, "_ever_mug_parked"):
                 self._ever_mug_parked = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)

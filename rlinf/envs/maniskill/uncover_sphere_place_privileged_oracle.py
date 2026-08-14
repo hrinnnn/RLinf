@@ -206,6 +206,7 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         if self._phase == "cover_reach":
             # The dynamic cover can settle while the arm is approaching, so
             # refresh the target from the live pose until grasp is acquired.
+            base.mug.set_disable_gravity(True)
             self._cover_grasp_pose = self._find_grasp_pose(env, base.mug)
             reach = self._cover_grasp_pose * sapien.Pose([0, 0, -0.05])
             if self._at_pose(base.agent.tcp.pose.sp, reach):
@@ -227,12 +228,17 @@ class UncoverSpherePlacePrivilegedChunkOracle:
 
         if self._phase == "cover_settle":
             if bool(np.asarray(base.agent.is_grasping(base.mug)).reshape(-1)[0]):
+                # Restore ordinary dynamic behavior after the gripper has
+                # secured the cover. The object remains dynamically graspable;
+                # gravity was disabled only to stabilize the suspended reset.
+                base.mug.set_disable_gravity(False)
                 self._phase = "cover_lift"
             else:
                 self._cover_attempts += 1
                 if self._cover_attempts > 3:
                     self._phase = "failed"
                 else:
+                    base.mug.set_disable_gravity(True)
                     self._phase = "cover_reach"
                     self._cover_grasp_pose = None
                     self._object_to_tcp = None
