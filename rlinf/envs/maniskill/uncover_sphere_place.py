@@ -109,9 +109,9 @@ class UncoverSpherePlaceEnv(BaseEnv):
         with torch.device(self.device):
             self.table_scene.initialize(env_idx)
             b = len(env_idx)
-            # Keep the paired nuisance variation small enough that the
-            # official Panda planner has a stable workspace margin.
-            xy = self._batched_episode_rng.uniform(-0.02, 0.02, size=(b, 2))
+            # Hold nuisance position fixed in the formal candidate so that
+            # the gate audit isolates handle and goal factors only.
+            xy = np.zeros((b, 2), dtype=np.float32)
             xy = torch.as_tensor(xy, dtype=self.sphere.pose.p.dtype, device=self.device)
             sphere_p = self.sphere.pose.p.clone()
             mug_p = self.mug.pose.p.clone()
