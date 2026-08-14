@@ -390,7 +390,14 @@ class UncoverSpherePlacePrivilegedChunkOracle:
         targets = np.asarray([path[index, :7] for index in indices], dtype=np.float32)
         actions = np.zeros((self.chunk_size, 8), dtype=np.float32)
         actions[:, -1] = gripper
-        delta_limit = 0.05 if phase in {"sphere_lift", "sphere_move", "sphere_place"} else 0.1
+        delta_limit = 0.05 if phase in {
+            "cover_lift",
+            "cover_move",
+            "cover_place",
+            "sphere_lift",
+            "sphere_move",
+            "sphere_place",
+        } else 0.1
         return UncoverSpherePlaceOraclePlan(
             actions,
             phase,
