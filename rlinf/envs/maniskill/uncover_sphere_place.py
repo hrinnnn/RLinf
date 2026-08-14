@@ -125,7 +125,9 @@ class UncoverSpherePlaceEnv(BaseEnv):
             mug_p[env_idx, 2] = TABLE_Z + 2 * SPHERE_RADIUS + MUG_HALF_SIZE[2] + 0.045
             bowl_xy = torch.tensor([0.16, -0.05], dtype=sphere_p.dtype, device=self.device)
             if self.rlinf_split == "goal_ood":
-                bowl_xy = torch.tensor([0.16, 0.10], dtype=sphere_p.dtype, device=self.device)
+                # Keep the shifted goal away from the initial cover approach
+                # and the cover parking location, so goal OOD is stage-local.
+                bowl_xy = torch.tensor([-0.16, -0.05], dtype=sphere_p.dtype, device=self.device)
             bowl_p[env_idx, :2] = bowl_xy
             bowl_p[env_idx, 2] = TABLE_Z
             mug_yaw = torch.zeros((b,), dtype=sphere_p.dtype, device=self.device)
