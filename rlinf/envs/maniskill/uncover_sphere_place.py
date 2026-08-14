@@ -125,9 +125,7 @@ class UncoverSpherePlaceEnv(BaseEnv):
             mug_p[env_idx, 2] = TABLE_Z + 2 * SPHERE_RADIUS + MUG_HALF_SIZE[2] + 0.045
             bowl_xy = torch.tensor([0.16, -0.05], dtype=sphere_p.dtype, device=self.device)
             if self.rlinf_split == "goal_ood":
-                # Keep the shifted goal away from the initial cover approach
-                # and the cover parking location, so goal OOD is stage-local.
-                bowl_xy = torch.tensor([0.16, -0.15], dtype=sphere_p.dtype, device=self.device)
+                bowl_xy = torch.tensor([0.16, 0.10], dtype=sphere_p.dtype, device=self.device)
             bowl_p[env_idx, :2] = bowl_xy
             bowl_p[env_idx, 2] = TABLE_Z
             mug_yaw = torch.zeros((b,), dtype=sphere_p.dtype, device=self.device)
@@ -144,6 +142,10 @@ class UncoverSpherePlaceEnv(BaseEnv):
             self.mug.set_linear_velocity(torch.zeros_like(self.mug.linear_velocity))
             self.mug.set_angular_velocity(torch.zeros_like(self.mug.angular_velocity))
             self.bowl.set_pose(Pose.create_from_pq(bowl_p, self.bowl.pose.q.clone()))
+            # The target is a stage-3 factor. Keep it out of the cover-removal
+            # collision scene, then restore collision once the cover is parked.
+            self.bowl.set_collision_group(0, 0)
+            self._target_collision_enabled = False
             if not hasattr(self, "_ever_mug_parked"):
                 self._ever_mug_parked = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
                 self._ever_sphere_grasped = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -200,6 +202,9 @@ class UncoverSpherePlaceEnv(BaseEnv):
         sphere_static = self.sphere.is_static(lin_thresh=1e-2, ang_thresh=0.5)
         self._ever_mug_parked |= mug_parked
         self._ever_sphere_grasped |= sphere_grasped
+        if bool(torch.any(mug_parked)) and not self._target_collision_enabled:
+            self.bowl.set_collision_group(0, 1)
+            self._target_collision_enabled = True
         success = self._ever_mug_parked & self._ever_sphere_grasped & sphere_in_bowl & sphere_released & sphere_static
         return {
             "success": success,
