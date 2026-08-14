@@ -69,7 +69,9 @@ class UncoverSpherePlaceEnv(BaseEnv):
         return CameraConfig("render_camera", pose, 512, 512, 1.05, 0.01, 100)
 
     def _load_scene(self, options: dict):
-        self.table_scene = TableSceneBuilder(self, robot_init_qpos_noise=0.01)
+        # Freeze robot initialization so the benchmark isolates the declared
+        # object and goal factors rather than reset-state nuisance.
+        self.table_scene = TableSceneBuilder(self, robot_init_qpos_noise=0.0)
         self.table_scene.build()
         self.mug = actors.build_box(
             self.scene, half_sizes=MUG_HALF_SIZE, color=[0.72, 0.42, 0.16, 1],
