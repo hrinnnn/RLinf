@@ -122,7 +122,7 @@ class UncoverSpherePlaceEnv(BaseEnv):
             # Keep a fixed clearance above the sphere. The margin is shared
             # by every split; it prevents the rotated cover from striking the
             # sphere during the initial close/lift motion.
-            mug_p[env_idx, 2] = TABLE_Z + 2 * SPHERE_RADIUS + MUG_HALF_SIZE[2] + 0.045
+            mug_p[env_idx, 2] = TABLE_Z + 2 * SPHERE_RADIUS + MUG_HALF_SIZE[2] + 0.015
             bowl_xy = torch.tensor([0.16, -0.05], dtype=sphere_p.dtype, device=self.device)
             if self.rlinf_split == "goal_ood":
                 bowl_xy = torch.tensor([0.16, 0.10], dtype=sphere_p.dtype, device=self.device)

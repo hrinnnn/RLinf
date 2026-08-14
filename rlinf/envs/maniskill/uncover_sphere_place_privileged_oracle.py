@@ -27,10 +27,12 @@ class UncoverSpherePlaceOraclePlan:
             return self.actions[min(step_index, len(self.actions) - 1)]
         current = _as_numpy(qpos).reshape(-1, 9)[0].astype(np.float32)
         target = self.joint_targets[min(step_index, len(self.joint_targets) - 1)]
+        delta = target[:7] - current[:7]
+        delta = np.clip(delta, -self.joint_delta_limit, self.joint_delta_limit)
         arm = _normalize_delta(
-            target[:7] - current[:7],
-            np.full(7, -self.joint_delta_limit, dtype=np.float32),
-            np.full(7, self.joint_delta_limit, dtype=np.float32),
+            delta,
+            np.full(7, -0.1, dtype=np.float32),
+            np.full(7, 0.1, dtype=np.float32),
         )
         return np.concatenate([arm.astype(np.float32), [self.gripper]])
 
