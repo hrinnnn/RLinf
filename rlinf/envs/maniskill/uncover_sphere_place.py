@@ -145,7 +145,8 @@ class UncoverSpherePlaceEnv(BaseEnv):
             self.mug.set_angular_velocity(torch.zeros_like(self.mug.angular_velocity))
             self.bowl.set_pose(Pose.create_from_pq(bowl_p, self.bowl.pose.q.clone()))
             # The target is a stage-3 factor. Keep it out of the cover-removal
-            # collision scene, then restore collision once the cover is parked.
+            # and sphere-grasp collision scene, then restore collision once
+            # the sphere has been grasped for transport and placement.
             self.bowl.set_collision_group(0, 0)
             self._target_collision_enabled = False
             if not hasattr(self, "_ever_mug_parked"):
@@ -204,7 +205,7 @@ class UncoverSpherePlaceEnv(BaseEnv):
         sphere_static = self.sphere.is_static(lin_thresh=1e-2, ang_thresh=0.5)
         self._ever_mug_parked |= mug_parked
         self._ever_sphere_grasped |= sphere_grasped
-        if bool(torch.any(mug_parked)) and not self._target_collision_enabled:
+        if bool(torch.any(self._ever_sphere_grasped)) and not self._target_collision_enabled:
             self.bowl.set_collision_group(0, 1)
             self._target_collision_enabled = True
         success = self._ever_mug_parked & self._ever_sphere_grasped & sphere_in_bowl & sphere_released & sphere_static
