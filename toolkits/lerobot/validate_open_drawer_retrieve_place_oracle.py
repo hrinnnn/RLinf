@@ -501,8 +501,9 @@ def main() -> None:
         env = RecordEpisode(
             env,
             output_dir=str(split_dir / "videos"),
+            trajectory_name="oracle_trajectories",
             save_video=args.save_video,
-            save_trajectory=False,
+            save_trajectory=True,
             save_on_reset=False,
             video_fps=30,
         )
