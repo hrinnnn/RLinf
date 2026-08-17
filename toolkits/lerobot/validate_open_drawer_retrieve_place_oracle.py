@@ -504,7 +504,7 @@ def main() -> None:
             trajectory_name="oracle_trajectories",
             save_video=args.save_video,
             save_trajectory=True,
-            save_on_reset=False,
+            save_on_reset=True,
             video_fps=30,
         )
         records = []
