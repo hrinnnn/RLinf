@@ -1,0 +1,97 @@
+defaults:
+  - model/pi0_5@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: ${oc.env:ASK4HELP_RLINF_PLACEMENT}
+
+runner:
+  task_type: sft
+  logger:
+    log_path: ${oc.env:OPEN_DRAWER_RUN_ROOT}
+    project_name: rlinf
+    experiment_name: ${oc.env:OPEN_DRAWER_EXPERIMENT_NAME,resume_50k}
+    logger_backends: ["tensorboard"]
+  resume_dir: ${oc.env:OPEN_DRAWER_RESUME_DIR}
+  max_epochs: -1
+  max_steps: 50000
+  val_check_interval: -1
+  save_interval: 5000
+
+data:
+  train_data_paths:
+    - dataset_path: ${oc.env:OPEN_DRAWER_ID_DATASET}
+      weight: 1.0
+  openpi_source_balanced: true
+  openpi_mask_padded_action_targets: true
+  openpi_valid_action_horizon: 10
+
+awbc:
+  enabled: false
+
+actor:
+  group_name: ActorGroup
+  training_backend: fsdp
+  micro_batch_size: 32
+  global_batch_size: 128
+  seed: 84000
+  model:
+    precision: null
+    model_path: ${oc.env:OPEN_DRAWER_PI05_MODEL_PATH}
+    model_type: openpi
+    num_action_chunks: 10
+    action_dim: 8
+    add_value_head: false
+    num_steps: 5
+    openpi:
+      config_name: pi05_rlt_maniskill_joint
+      num_images_in_input: 2
+      train_expert_only: true
+      detach_critic_input: true
+      action_horizon: 10
+      action_chunk: ${actor.model.num_action_chunks}
+      action_env_dim: ${actor.model.action_dim}
+      num_steps: ${actor.model.num_steps}
+      noise_method: flow_sde
+      use_rlt: false
+    openpi_data:
+      repo_id: ${oc.env:OPEN_DRAWER_ID_DATASET}
+      default_prompt: open the drawer, retrieve the blue object, and place it in the green tray
+      norm_stats_path: ${oc.env:OPEN_DRAWER_ID_NORM_STATS}
+  optim:
+    lr: 2.5e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-8
+    weight_decay: 1.0e-10
+    clip_grad: 1.0
+    total_training_steps: ${runner.max_steps}
+    lr_warmup_steps: 25
+    lr_scheduler: cosine
+    num_cycles: 0.5
+    min_lr: 2.5e-6
+  fsdp_config:
+    strategy: fsdp
+    sharding_strategy: no_shard
+    use_orig_params: false
+    gradient_checkpointing: false
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: false
+
+critic:
+  use_critic_model: false
