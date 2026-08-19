@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 RLINF_ROOT = Path(__file__).resolve().parents[2]
 if str(RLINF_ROOT) not in sys.path:
     sys.path.insert(0, str(RLINF_ROOT))
@@ -98,15 +100,15 @@ def _run_reference(env: Any, seed: int, planner: PandaPosePlannerClient):
     env.step = step_hook  # type: ignore[method-assign]
     try:
         stages = solve_episode(env, seed, planner)
-        if not bool(stages["success"]):
-            return None
-        if not actions or len(records) != len(actions) + 1:
-            return None
         metadata["oracle"] = {
             "type": "privileged_panda_motion_planning",
             "stages": _jsonable(stages),
         }
-        return records, actions, dict(metadata)
+        valid = bool(stages["success"]) and bool(actions) and len(records) == len(actions) + 1
+        return records, actions, dict(metadata), valid
+    except Exception as exc:
+        metadata["oracle_error"] = repr(exc)
+        return records, actions, dict(metadata), False
     finally:
         env.reset = original_reset  # type: ignore[method-assign]
         env.step = original_step  # type: ignore[method-assign]
@@ -114,6 +116,7 @@ def _run_reference(env: Any, seed: int, planner: PandaPosePlannerClient):
 
 def _replay(env: Any, seed: int, solver_actions: list[Any], lower, upper):
     observation, _info = env.reset(seed=seed)
+    metadata = reset_metadata(env, split="id")
     records = [_extract_record(observation)]
     actions = []
     success = False
@@ -127,9 +130,71 @@ def _replay(env: Any, seed: int, solver_actions: list[Any], lower, upper):
         success = _bool_scalar(info.get("success", False))
         if success or _bool_scalar(terminated) or _bool_scalar(truncated):
             break
-    if not success or len(records) != len(actions) + 1:
-        return None
-    return records, actions
+    return records, actions, metadata, bool(success and len(records) == len(actions) + 1)
+
+
+def _save_attempt_evidence(
+    attempt_dir: Path,
+    *,
+    seed: int,
+    attempt: int,
+    metadata: dict[str, Any],
+    records: list[Any],
+    actions: list[Any],
+    accepted: bool,
+    reference_success: bool,
+    replay_success: bool,
+    main_camera: str,
+    wrist_camera: str,
+    control_freq: int,
+) -> dict[str, Any]:
+    """Persist raw attempt evidence before an accepted episode is committed."""
+
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "attempt": attempt,
+        "seed": seed,
+        "accepted": accepted,
+        "reference_success": reference_success,
+        "replay_success": replay_success,
+        "steps": len(actions),
+        "reset_metadata": metadata,
+    }
+    if records and len(records) == len(actions) + 1:
+        action_array = _to_numpy(actions).astype("float32") if actions else _to_numpy([]).astype("float32")
+        state_array = _to_numpy([record.state for record in records]).astype("float32")
+        npy_actions = attempt_dir / "actions.npy"
+        npy_states = attempt_dir / "states.npy"
+        np.save(npy_actions, action_array)
+        np.save(npy_states, state_array)
+        payload["actions"] = str(npy_actions)
+        payload["states"] = str(npy_states)
+        payload["state_shape"] = list(state_array.shape)
+        payload["action_shape"] = list(action_array.shape)
+        (attempt_dir / "reset_metadata.json").write_text(
+            json.dumps(_jsonable(metadata), indent=2) + "\n", encoding="utf-8"
+        )
+        payload["reset_metadata_path"] = str(attempt_dir / "reset_metadata.json")
+        if main_camera and wrist_camera and actions:
+            frames = _build_frames(
+                records=records,
+                actions=actions,
+                task=TASK_INSTRUCTION,
+                main_camera=main_camera,
+                wrist_camera=wrist_camera,
+            )
+            video_path = write_episode_video_durably(
+                frames,
+                video_dir=attempt_dir,
+                episode_index=0,
+                seed=seed,
+                fps=control_freq,
+            )
+            payload["video"] = str(video_path)
+    (attempt_dir / "attempt.json").write_text(
+        json.dumps(_jsonable(payload), indent=2) + "\n", encoding="utf-8"
+    )
+    return payload
 
 
 def parse_args() -> argparse.Namespace:
@@ -157,10 +222,14 @@ def main() -> None:
 
     dataset_path = _resolve_output_path(args.repo_id)
     video_dir = args.video_dir or args.output_dir / "videos"
-    for path in (dataset_path, args.output_dir, video_dir):
+    raw_attempt_dir = args.output_dir / "raw_attempts"
+    accepted_evidence_dir = args.output_dir / "episodes"
+    for path in (dataset_path, args.output_dir, video_dir, raw_attempt_dir):
         if path.exists():
             raise FileExistsError(f"refusing to overwrite existing path: {path}")
     args.output_dir.mkdir(parents=True)
+    raw_attempt_dir.mkdir()
+    accepted_evidence_dir.mkdir()
 
     solver_env = _build_env(args, control_mode="pd_joint_pos")
     replay_env = _build_env(args, control_mode="pd_joint_delta_pos")
@@ -177,16 +246,47 @@ def main() -> None:
         while saved < args.num_episodes and attempts < args.max_attempts:
             seed = args.seed + attempts
             attempts += 1
+            attempt_dir = raw_attempt_dir / f"attempt_{attempts:06d}_seed_{seed}"
             reference = _run_reference(solver_env, seed, planner)
-            if reference is None:
+            reference_records, solver_actions, reference_metadata, reference_success = reference
+            if not reference_success:
+                _save_attempt_evidence(
+                    attempt_dir,
+                    seed=seed,
+                    attempt=attempts,
+                    metadata=reference_metadata,
+                    records=reference_records,
+                    actions=solver_actions,
+                    accepted=False,
+                    reference_success=False,
+                    replay_success=False,
+                    main_camera="",
+                    wrist_camera="",
+                    control_freq=args.control_freq,
+                )
                 LOG.warning("Rejected seed %d: absolute-position oracle failed", seed)
                 continue
-            _reference_records, solver_actions, metadata = reference
             replay = _replay(replay_env, seed, solver_actions, lower, upper)
-            if replay is None:
+            records, actions, replay_metadata, replay_success = replay
+            metadata = {**reference_metadata, **replay_metadata}
+            metadata["oracle"] = reference_metadata.get("oracle", {})
+            if not replay_success:
+                _save_attempt_evidence(
+                    attempt_dir,
+                    seed=seed,
+                    attempt=attempts,
+                    metadata=metadata,
+                    records=records,
+                    actions=actions,
+                    accepted=False,
+                    reference_success=True,
+                    replay_success=False,
+                    main_camera="",
+                    wrist_camera="",
+                    control_freq=args.control_freq,
+                )
                 LOG.warning("Rejected seed %d: joint-delta replay failed", seed)
                 continue
-            records, actions = replay
 
             if not main_camera:
                 main_camera = _select_camera(
@@ -211,6 +311,64 @@ def main() -> None:
             visual_motion = validate_visual_motion(
                 frames, min_peak_mean_abs_delta=args.min_visual_change
             )
+            metadata["camera"] = {
+                "main": main_camera,
+                "wrist": wrist_camera,
+                "main_shape": list(frames[0]["image"].shape),
+                "wrist_shape": list(frames[0]["wrist_image"].shape),
+                "requested_size": [args.image_size, args.image_size],
+            }
+            action_array = np.asarray(actions, dtype=np.float32)
+            state_array = np.asarray([record.state for record in records], dtype=np.float32)
+            if action_array.ndim != 2 or action_array.shape[1] != 8:
+                _save_attempt_evidence(
+                    attempt_dir,
+                    seed=seed,
+                    attempt=attempts,
+                    metadata=metadata,
+                    records=records,
+                    actions=actions,
+                    accepted=False,
+                    reference_success=True,
+                    replay_success=True,
+                    main_camera=main_camera,
+                    wrist_camera=wrist_camera,
+                    control_freq=args.control_freq,
+                )
+                LOG.warning("Rejected seed %d: invalid action shape %s", seed, action_array.shape)
+                continue
+            if state_array.shape != (len(actions) + 1, 9) or not visual_motion:
+                _save_attempt_evidence(
+                    attempt_dir,
+                    seed=seed,
+                    attempt=attempts,
+                    metadata=metadata,
+                    records=records,
+                    actions=actions,
+                    accepted=False,
+                    reference_success=True,
+                    replay_success=True,
+                    main_camera=main_camera,
+                    wrist_camera=wrist_camera,
+                    control_freq=args.control_freq,
+                )
+                LOG.warning("Rejected seed %d: state shape %s or visual_motion=%s", seed, state_array.shape, visual_motion)
+                continue
+
+            _save_attempt_evidence(
+                attempt_dir,
+                seed=seed,
+                attempt=attempts,
+                metadata=metadata,
+                records=records,
+                actions=actions,
+                accepted=True,
+                reference_success=True,
+                replay_success=True,
+                main_camera=main_camera,
+                wrist_camera=wrist_camera,
+                control_freq=args.control_freq,
+            )
 
             if dataset is None:
                 dataset = _create_dataset(
@@ -224,8 +382,9 @@ def main() -> None:
             for frame in frames:
                 dataset.add_frame(frame)
             dataset.save_episode()
+            video_path = None
             if args.save_videos:
-                write_episode_video_durably(
+                video_path = write_episode_video_durably(
                     frames,
                     video_dir=video_dir,
                     episode_index=saved,
@@ -243,8 +402,21 @@ def main() -> None:
                 "main_camera": main_camera,
                 "wrist_camera": wrist_camera,
                 "visual_motion": visual_motion,
+                "video": str(video_path) if video_path else None,
                 **metadata,
             }
+            accepted_dir = accepted_evidence_dir / f"episode_{saved:06d}"
+            accepted_dir.mkdir()
+            np.save(accepted_dir / "actions.npy", action_array)
+            np.save(accepted_dir / "states.npy", state_array)
+            (accepted_dir / "reset_metadata.json").write_text(
+                json.dumps(_jsonable(metadata), indent=2) + "\n", encoding="utf-8"
+            )
+            (accepted_dir / "oracle_stages.json").write_text(
+                json.dumps(_jsonable(metadata.get("oracle", {}).get("stages", {})), indent=2) + "\n",
+                encoding="utf-8",
+            )
+            row["accepted_evidence"] = str(accepted_dir)
             rows.append(row)
             saved += 1
             total_actions += len(actions)
@@ -279,6 +451,8 @@ def main() -> None:
         "split": "id",
         "episodes": saved,
         "attempts": attempts,
+        "raw_attempts": str(raw_attempt_dir),
+        "accepted_evidence": str(accepted_evidence_dir),
         "total_actions": total_actions,
         "min_actions": min(action_counts),
         "max_actions": max(action_counts),
