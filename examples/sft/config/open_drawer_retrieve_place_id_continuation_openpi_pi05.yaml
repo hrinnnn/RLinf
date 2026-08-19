@@ -13,25 +13,28 @@ hydra:
 cluster:
   num_nodes: 1
   component_placement:
-    actor,env,rollout: ${oc.env:ASK4HELP_RLINF_PLACEMENT,7-7}
+    actor,env,rollout: ${oc.env:ASK4HELP_RLINF_PLACEMENT,2-2}
 
 runner:
   task_type: sft
   logger:
-    log_path: ${oc.env:OPEN_DRAWER_RUN_ROOT,/data/zhaozhixuan/Ask4Help-open-drawer/results/id_policy_training_v1}
+    log_path: ${oc.env:OPEN_DRAWER_RUN_ROOT,/data/zhaozhixuan/Ask4Help-open-drawer/results}
     project_name: rlinf
-    experiment_name: ${oc.env:OPEN_DRAWER_EXPERIMENT_NAME,sft_2000}
+    experiment_name: ${oc.env:OPEN_DRAWER_EXPERIMENT_NAME,id_continuation}
     logger_backends: ["tensorboard"]
+  resume_dir: ${oc.env:OPEN_DRAWER_RESUME_DIR}
   max_epochs: -1
-  max_steps: 2000
+  max_steps: ${oc.env:OPEN_DRAWER_MAX_STEPS,10000}
   val_check_interval: -1
-  save_interval: 250
+  save_interval: ${oc.env:OPEN_DRAWER_SAVE_INTERVAL,500}
 
 data:
   train_data_paths:
     - dataset_path: ${oc.env:OPEN_DRAWER_ID_DATASET}
       weight: 1.0
   openpi_source_balanced: false
+  openpi_mask_padded_action_targets: true
+  openpi_valid_action_horizon: 10
 
 awbc:
   enabled: false
@@ -39,17 +42,18 @@ awbc:
 actor:
   group_name: ActorGroup
   training_backend: fsdp
-  micro_batch_size: 4
-  global_batch_size: 64
-  seed: 7000
+  micro_batch_size: 32
+  global_batch_size: 128
+  seed: ${oc.env:OPEN_DRAWER_TRAIN_SEED,7000}
   model:
     precision: null
     model_path: ${oc.env:OPEN_DRAWER_PI05_MODEL_PATH}
     model_type: openpi
     num_action_chunks: 10
     action_dim: 8
-    add_value_head: false
+    is_lora: false
     num_steps: 5
+    add_value_head: false
     openpi:
       config_name: pi05_rlt_maniskill_joint
       num_images_in_input: 2
@@ -72,7 +76,7 @@ actor:
     adam_eps: 1.0e-8
     weight_decay: 1.0e-10
     clip_grad: 1.0
-    total_training_steps: ${runner.max_steps}
+    total_training_steps: 10000
     lr_warmup_steps: 25
     lr_scheduler: cosine
     num_cycles: 0.5
