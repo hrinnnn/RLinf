@@ -33,11 +33,18 @@ def _move(planner, pose) -> bool:
     return planner.move_to_pose_with_RRTConnect(pose) != -1
 
 
-def run_oracle(env, *, seed: int) -> dict[str, object]:
+def run_oracle(
+    env,
+    *,
+    seed: int,
+    reset_before: bool = True,
+    force_planner_pd_joint_pos: bool = False,
+) -> dict[str, object]:
     import sapien
     from mani_skill.examples.motionplanning.panda.motionplanner import PandaArmMotionPlanningSolver
 
-    env.reset(seed=seed)
+    if reset_before:
+        env.reset(seed=seed)
     base = env.unwrapped
     reset_provenance = reset_metadata(base, split=base.rlinf_split)
     planner = PandaArmMotionPlanningSolver(
@@ -48,6 +55,8 @@ def run_oracle(env, *, seed: int) -> dict[str, object]:
         visualize_target_grasp_pose=False,
         print_env_info=False,
     )
+    if force_planner_pd_joint_pos:
+        planner.control_mode = "pd_joint_pos"
     try:
         approaching = np.array([0.0, 0.0, -1.0])
         target_closing = base.agent.tcp.pose.to_transformation_matrix()[0, :3, 1].cpu().numpy()
