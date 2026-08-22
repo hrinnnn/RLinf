@@ -36,7 +36,6 @@ def _move(planner, pose) -> bool:
 def run_oracle(env, *, seed: int) -> dict[str, object]:
     import sapien
     from mani_skill.examples.motionplanning.panda.motionplanner import PandaArmMotionPlanningSolver
-    from mani_skill.examples.motionplanning.panda.utils import compute_grasp_info_by_obb, get_actor_obb
 
     env.reset(seed=seed)
     base = env.unwrapped
@@ -49,13 +48,16 @@ def run_oracle(env, *, seed: int) -> dict[str, object]:
         print_env_info=False,
     )
     try:
-        obb = get_actor_obb(base.obj)
         approaching = np.array([0.0, 0.0, -1.0])
         target_closing = base.agent.tcp.pose.to_transformation_matrix()[0, :3, 1].cpu().numpy()
-        info = compute_grasp_info_by_obb(
-            obb, approaching=approaching, target_closing=target_closing, depth=0.025
-        )
-        grasp_pose = base.agent.build_grasp_pose(approaching, info["closing"], base.obj.pose.sp.p)
+        # The installed ManiSkill wheel includes the official Panda planner but
+        # not the optional example OBB helper. Both selected YCB objects are
+        # fixed upright variants, so a top-down grasp with the planner's TCP
+        # closing axis is the deterministic equivalent for this task.
+        closing = target_closing - (approaching @ target_closing) * approaching
+        closing_norm = float(np.linalg.norm(closing))
+        closing = closing / closing_norm if closing_norm > 1e-6 else np.array([1.0, 0.0, 0.0])
+        grasp_pose = base.agent.build_grasp_pose(approaching, closing, base.obj.pose.sp.p)
         reached_pregrasp = _move(planner, grasp_pose * sapien.Pose([0.0, 0.0, -0.06]))
         reached_grasp = reached_pregrasp and _move(planner, grasp_pose)
         grasp_steps = 0
@@ -148,4 +150,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
