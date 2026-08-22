@@ -25,7 +25,7 @@ from rlinf.envs.maniskill.pick_single_ycb_object_variation import (  # noqa: E40
     register_controlled_pick_single_ycb_object_variants,
     reset_metadata,
 )
-from rlinf.toolkits.lerobot.collect_maniskill_peg_lerobot_joint import (  # noqa: E402
+from toolkits.lerobot.collect_maniskill_peg_lerobot_joint import (  # noqa: E402
     _build_frames,
     _camera_image,
     _convert_solver_action_to_joint_delta,
@@ -114,7 +114,7 @@ def _replay(env: Any, *, seed: int, solver_actions: list[np.ndarray], lower: np.
 
 
 def _write_video(frames: list[dict[str, Any]], destination: Path, fps: int) -> None:
-    from rlinf.toolkits.lerobot.collect_maniskill_peg_lerobot_joint import _make_video_frame
+    from toolkits.lerobot.collect_maniskill_peg_lerobot_joint import _make_video_frame
     import imageio.v2 as imageio
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -237,4 +237,3 @@ def main() -> None:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     main()
-
