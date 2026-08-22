@@ -39,6 +39,7 @@ def run_oracle(env, *, seed: int) -> dict[str, object]:
 
     env.reset(seed=seed)
     base = env.unwrapped
+    reset_provenance = reset_metadata(base, split=base.rlinf_split)
     planner = PandaArmMotionPlanningSolver(
         env,
         debug=False,
@@ -96,7 +97,6 @@ def run_oracle(env, *, seed: int) -> dict[str, object]:
 
         evaluation = base.evaluate()
         success = _scalar(evaluation["success"])
-        metadata = reset_metadata(base, split=base.rlinf_split)
         return {
             "seed": seed,
             "split": base.rlinf_split,
@@ -110,7 +110,7 @@ def run_oracle(env, *, seed: int) -> dict[str, object]:
             "still_grasped_after_lift": still_grasped,
             "lift_delta_z": final_z - initial_z,
             "placed": placed,
-            "reset_metadata": metadata,
+            "reset_metadata": reset_provenance,
         }
     finally:
         planner.close()
