@@ -46,7 +46,9 @@ class SFTRunner:
 
         self.consumed_samples = 0
         # the step here is GRPO step
-        self.global_step = 0
+        # A weights-only continuation can preserve cumulative step numbering
+        # while intentionally starting a fresh optimizer/scheduler.
+        self.global_step = int(cfg.runner.get("initial_step", 0))
         early_stop_cfg = cfg.runner.get("early_stop", None)
         self.early_stop = (
             EarlyStopController(early_stop_cfg) if early_stop_cfg is not None else None
