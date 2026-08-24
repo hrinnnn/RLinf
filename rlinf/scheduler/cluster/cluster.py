@@ -314,8 +314,13 @@ class Cluster:
 
         try:
             # First try to connect to an existing Ray cluster
+            # Diagnostics may need an isolated local Ray instance while a
+            # separate experiment is already running on the host.  Keep the
+            # historical auto-connect default for normal jobs, but allow an
+            # explicit local address for those isolated launches.
+            ray_address = os.environ.get("RLINF_RAY_ADDRESS", "auto")
             ray_init_kwargs: dict[str, Any] = {
-                "address": "auto",
+                "address": ray_address,
                 "logging_level": Cluster.LOGGING_LEVEL,
                 "namespace": Cluster.NAMESPACE,
             }
